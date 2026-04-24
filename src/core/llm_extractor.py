@@ -9,16 +9,29 @@ import httpx
 
 log = logging.getLogger("llm-extractor")
 
-CATEGORIES = ["preference", "fact", "decision", "entity", "reflection", "other"]
+CATEGORIES = ["profile", "preferences", "entities", "events", "cases", "patterns", "other"]
 
 SYSTEM_PROMPT = (
     "你是一个记忆提取助手。从用户输入中提取结构化信息。\n\n"
     "输出格式（JSON）：\n"
-    '{ "category": "preference|fact|decision|entity|reflection|other",\n'
+    '{\n'
+    '  "category": "profile|preferences|entities|events|cases|patterns|other",\n'
     '  "6w": { "who": "人物/角色", "what": "核心事件/内容", "when": "时间", "where": "地点", "why": "原因", "how": "方式" },\n'
-    '  "importance": 0.0-1.0 }\n\n'
-    "规则：\n"
-    "- category: preference=用户偏好, fact=客观事实, decision=决定计划, entity=实体, reflection=反思, other=其他\n"
+    '  "importance": 0.0-1.0\n'
+    '}\n\n'
+    "分类规则：\n"
+    "- profile: 用户身份、背景、职业、关系、位置等静态信息\n"
+    "  例：'我是程序员'、'我在北京工作'、'我有三个孩子'\n"
+    "- preferences: 喜好、倾向、习惯、口味等偏好\n"
+    "  例：'我喜欢川菜'、'我不喝咖啡'、'习惯早起'\n"
+    "- entities: 提到的人名/公司名/产品名/事件名等具体实体\n"
+    "  例：'张总说'、'用GPT-4'、'下周开会'\n"
+    "- events: 发生的事、事实陈述、时间线事件\n"
+    "  例：'上周感冒了'、'项目上线了'、'天气变冷'\n"
+    "- cases: 决定、问题、解决方案、挑战、选项分析\n"
+    "  例：'决定去北京'、'我选了方案A'、'遇到bug'\n"
+    "- patterns: 重复行为、模式、规律、洞察\n"
+    "  例：'每次加班都点外卖'、'总在周末购物'\n"
     "- importance: 0.3以下=闲聊, 0.3-0.6=普通, 0.6-0.8=重要, 0.8-1.0=关键\n"
     "- 没有对应信息则留空"
 )
@@ -113,27 +126,44 @@ class LLMExtractor:
         return "other"
 
     def _fallback_extract(self, content: str) -> dict:
-        import re
-
         words = content.lower()
-        why_indicators = ["因为", "为了", "原因", "so that", "because", "reason"]
-        how_indicators = ["通过", "使用", "用", "using", "by", "via", "方法"]
-        decision_indicators = ["决定", "决定要", "要", "决定", "will", "plan", "going to"]
-        pref_indicators = ["喜欢", "不喜欢", "prefer", "hate", "love", "want", "不想要"]
+        pref_indicators = ["喜欢", "不喜欢", "prefer", "hate", "love", "want", "不想要", "倾向"]
+        decision_indicators = ["决定", "决定要", "will", "plan", "going to", "选了", "选择"]
+        entity_indicators = ["张总", "王", "李", "公司", "GPT", "产品", "项目", "会议"]
+        event_indicators = ["发生", "上周", "昨天", "今天", "上线", "完成", "结束"]
+        pattern_indicators = ["每次", "总是", "经常", "通常", "往往", "规律"]
+        profile_indicators = ["我是", "我在", "我有", "职业", "工作", "住在"]
 
         category = "other"
-        for kw in decision_indicators:
+        for kw in pref_indicators:
             if kw in words:
-                category = "decision"
+                category = "preferences"
                 break
         if category == "other":
-            for kw in pref_indicators:
+            for kw in decision_indicators:
                 if kw in words:
-                    category = "preference"
+                    category = "cases"
                     break
         if category == "other":
-            if re.search(r"^\[?\d{4}[-/]\d{2}", content):
-                category = "fact"
+            for kw in entity_indicators:
+                if kw in words:
+                    category = "entities"
+                    break
+        if category == "other":
+            for kw in event_indicators:
+                if kw in words:
+                    category = "events"
+                    break
+        if category == "other":
+            for kw in pattern_indicators:
+                if kw in words:
+                    category = "patterns"
+                    break
+        if category == "other":
+            for kw in profile_indicators:
+                if kw in words:
+                    category = "profile"
+                    break
 
         importance = 0.3
         if any(kw in words for kw in ["重要", "关键", "必须", "critical", "important", "must"]):
