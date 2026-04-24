@@ -11,6 +11,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+import httpx
 import uvicorn
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -40,7 +41,7 @@ DEFAULT_EMBEDDING_URL = os.getenv("EMBEDDING_URL", "http://localhost:11434/api/e
 DEFAULT_EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "bge-m3")
 DEFAULT_EMBEDDING_DIM = int(os.getenv("EMBEDDING_DIM", "1024"))
 DEFAULT_OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434/api/generate")
-DEFAULT_LLM_MODEL = os.getenv("LLM_MODEL", "qwen3.5:4b")
+DEFAULT_LLM_MODEL = os.getenv("LLM_MODEL", "qwen3.5:9b")
 DEFAULT_LLM_WARMUP_INTERVAL = int(os.getenv("LLM_WARMUP_INTERVAL", "0"))
 
 app = FastAPI(title="Memory Recall Server")
@@ -85,9 +86,9 @@ llm_extractor: Any = None
 
 async def _warmup_llm(url: str, model: str) -> None:
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            resp = await client.post(url, json={"model": model, "prompt": "."})
-            log.info(f"[warmup] {model} loaded: {resp.status_code == 200}")
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            resp = await client.post(url, json={"model": model, "prompt": ".", "think": False})
+            log.info(f"[warmup] {model} ready: {resp.status_code == 200}")
     except Exception as e:
         log.warning(f"[warmup] failed to warmup {model}: {e}")
 
@@ -113,8 +114,6 @@ async def get_services():
         bm25_index = BM25Index(index_file=str(BM25_INDEX_FILE))
         graph_store = GraphStore(graph_file=str(GRAPH_FILE))
         llm_extractor = LLMExtractor(ollama_url=DEFAULT_OLLAMA_URL, model=DEFAULT_LLM_MODEL)
-
-        await _warmup_llm(DEFAULT_OLLAMA_URL, DEFAULT_LLM_MODEL)
 
     return qdrant_store, bm25_index, graph_store, llm_extractor
 
@@ -209,14 +208,17 @@ async def store(req: StoreRequest):
 
     log.info(f"[/store] id={memory_id} content='{req.content[:50]}...'")
 
-    vector = await store.embed(req.content)
-    if not vector:
-        raise HTTPException(status_code=503, detail="Embedding service unavailable")
+    embed_task = asyncio.create_task(store.embed(req.content))
+    extract_task = asyncio.create_task(extractor.extract(req.content))
 
-    extraction = {}
     try:
-        extraction = await extractor.extract(req.content)
-        log.info(f"[/store] LLM extraction: category={extraction.get('category')} 6w keys={[k for k in extraction.get('6w', {}).keys() if extraction['6w'][k]]}")
+        vector = await embed_task
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"Embedding failed: {e}")
+
+    try:
+        extraction = await extract_task
+        log.info(f"[/store] LLM extraction: category={extraction.get('category')} 6w keys={[k for k in extraction['6w'].keys() if extraction['6w'][k]]}")
     except Exception as e:
         log.warning(f"[/store] LLM extraction failed (non-fatal): {e}")
         extraction = {"category": "other", "6w": {}}
@@ -309,4 +311,5 @@ if __name__ == "__main__":
     log.info(f"  Qdrant: {DEFAULT_QDRANT_HOST}:{DEFAULT_QDRANT_PORT}/{DEFAULT_COLLECTION}")
     log.info(f"  Embedding: {DEFAULT_EMBEDDING_URL} ({DEFAULT_EMBEDDING_MODEL})")
     log.info(f"  Ollama: {DEFAULT_OLLAMA_URL}")
+    asyncio.run(_warmup_llm(DEFAULT_OLLAMA_URL, DEFAULT_LLM_MODEL))
     uvicorn.run(app, host="0.0.0.0", port=8765, log_level="info")

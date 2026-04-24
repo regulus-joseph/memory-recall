@@ -51,6 +51,7 @@ class LLMExtractor:
                     "model": self.model,
                     "prompt": prompt,
                     "stream": False,
+                    "think": False,
                     "options": {"temperature": 0.1},
                 },
                 timeout=60.0,
