@@ -1,0 +1,16 @@
+node_modules/
+__pycache__/
+*.pyc
+.pytest_cache/
+*.egg-info/
+.venv/
+venv/
+.env
+*.db
+*.sqlite
+wal/
+bm25_index.json
+memory_graph.json
+*.log
+dist/
+build/
