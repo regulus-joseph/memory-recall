@@ -199,62 +199,98 @@ async def recall(req: RecallRequest):
 
 @app.post("/store")
 async def store(req: StoreRequest):
-    """Store a memory: vector + BM25 index + graph + LLM extraction"""
-    store, bm25, graph, extractor = await get_services()
+    """Store a memory immediately (no LLM extraction in critical path)."""
+    store_obj, bm25, graph, extractor = await get_services()
 
     memory_id = str(uuid.uuid4())
     conversation_id = req.conversation_id or str(uuid.uuid4())
     agent_id = req.agent_id or "default"
+    stored_at = __import__("datetime").datetime.now().isoformat()
 
     log.info(f"[/store] id={memory_id} content='{req.content[:50]}...'")
 
-    embed_task = asyncio.create_task(store.embed(req.content))
-    extract_task = asyncio.create_task(extractor.extract(req.content))
-
     try:
-        vector = await embed_task
+        vector = await store_obj.embed(req.content)
     except Exception as e:
         raise HTTPException(status_code=503, detail=f"Embedding failed: {e}")
 
-    try:
-        extraction = await extract_task
-        log.info(f"[/store] LLM extraction: category={extraction.get('category')} 6w keys={[k for k in extraction['6w'].keys() if extraction['6w'][k]]}")
-    except Exception as e:
-        log.warning(f"[/store] LLM extraction failed (non-fatal): {e}")
-        extraction = {"category": "other", "6w": {}}
+    if not vector:
+        raise HTTPException(status_code=503, detail="Embedding returned empty vector")
 
-    payload = {
+    immediate_payload = {
         "content": req.content,
         "agent_id": agent_id,
         "conversation_id": conversation_id,
-        "category": extraction.get("category", "other"),
-        "6w": extraction.get("6w", {}),
-        "importance": extraction.get("importance", 0.5),
-        "stored_at": __import__("datetime").datetime.now().isoformat(),
+        "category": "other",
+        "6w": {},
+        "importance": 0.5,
+        "stored_at": stored_at,
         "state": "confirmed",
         "access_count": 0,
-        "last_accessed": __import__("datetime").datetime.now().isoformat(),
+        "last_accessed": stored_at,
         "graph_edges": [],
+        "extraction_done": False,
         **(req.metadata or {}),
     }
 
-    stored_id = await store.upsert(memory_id, vector, payload)
+    await store_obj.upsert(memory_id, vector, immediate_payload)
     bm25.add(memory_id, req.content)
 
-    graph.add_node(memory_id, payload)
+    graph.add_node(memory_id, immediate_payload)
     if req.metadata and req.metadata.get("conversation_id"):
         graph.add_session_edge(memory_id, conversation_id)
 
-    l1_results_for_graph = await store.vector_search(req.content, limit=5)
-    graph.build_recall_edges(memory_id, [r["id"] for r in l1_results_for_graph if r.get("id")])
+    l1_results = await store_obj.vector_search(req.content, limit=5)
+    graph.build_recall_edges(memory_id, [r["id"] for r in l1_results if r.get("id")])
+
+    asyncio.create_task(
+        _async_extraction_and_update(
+            memory_id, req.content, extractor, store_obj,
+            agent_id, conversation_id, stored_at, req.metadata
+        )
+    )
 
     return {
-        "memory_id": stored_id,
+        "memory_id": memory_id,
         "conversation_id": conversation_id,
-        "category": payload["category"],
-        "6w": payload["6w"],
-        "importance": payload["importance"],
+        "pending": True,
     }
+
+
+async def _async_extraction_and_update(
+    memory_id: str,
+    content: str,
+    extractor,
+    store_obj,
+    agent_id: str,
+    conversation_id: str,
+    stored_at: str,
+    metadata: dict | None,
+):
+    """Background: extract 6w/category and update payload."""
+    try:
+        extraction = await extractor.extract(content)
+        log.info(f"[bg] extraction done for {memory_id}: {extraction.get('category')}")
+        updated_payload = {
+            "content": content,
+            "agent_id": agent_id,
+            "conversation_id": conversation_id,
+            "category": extraction.get("category", "other"),
+            "6w": extraction.get("6w", {}),
+            "importance": extraction.get("importance", 0.5),
+            "stored_at": stored_at,
+            "state": "confirmed",
+            "access_count": 0,
+            "last_accessed": __import__("datetime").datetime.now().isoformat(),
+            "graph_edges": [],
+            "extraction_done": True,
+            **(metadata or {}),
+        }
+        vector = await store_obj.embed(content)
+        if vector:
+            await store_obj.upsert(memory_id, vector, updated_payload)
+    except Exception as e:
+        log.warning(f"[bg] extraction failed for {memory_id}: {e}")
 
 
 @app.post("/forget")
@@ -311,5 +347,11 @@ if __name__ == "__main__":
     log.info(f"  Qdrant: {DEFAULT_QDRANT_HOST}:{DEFAULT_QDRANT_PORT}/{DEFAULT_COLLECTION}")
     log.info(f"  Embedding: {DEFAULT_EMBEDDING_URL} ({DEFAULT_EMBEDDING_MODEL})")
     log.info(f"  Ollama: {DEFAULT_OLLAMA_URL}")
-    asyncio.run(_warmup_llm(DEFAULT_OLLAMA_URL, DEFAULT_LLM_MODEL))
-    uvicorn.run(app, host="0.0.0.0", port=8765, log_level="info")
+    config = uvicorn.Config(app, host="0.0.0.0", port=8765, log_level="info", lifespan="on")
+    server = uvicorn.Server(config)
+
+    async def _run_with_warmup():
+        asyncio.create_task(_warmup_llm(DEFAULT_OLLAMA_URL, DEFAULT_LLM_MODEL))
+        await server.serve()
+
+    asyncio.run(_run_with_warmup())
