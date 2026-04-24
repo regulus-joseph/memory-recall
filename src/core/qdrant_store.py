@@ -71,6 +71,18 @@ class QdrantStore:
             log.warning(f"Qdrant init failed (non-fatal): {e}")
             self._initialized = True
 
+    def build_enhanced_text(self, content: str, six_w: dict) -> str:
+        parts = [f"原文: {content}"]
+        six_w_labels = {
+            "who": "人物", "what": "事件", "when": "时间",
+            "where": "地点", "why": "原因", "how": "方式"
+        }
+        for key, label in six_w_labels.items():
+            val = six_w.get(key, "")
+            if val:
+                parts.append(f"{label}: {val}")
+        return " | ".join(parts)
+
     async def embed(self, text: str) -> list[float]:
         try:
             client = await self._get_client()
@@ -87,6 +99,10 @@ class QdrantStore:
         except Exception as e:
             log.error(f"Embedding failed: {e}")
             return []
+
+    async def embed_enhanced(self, content: str, six_w: dict) -> list[float]:
+        text = self.build_enhanced_text(content, six_w)
+        return await self.embed(text)
 
     async def upsert(self, memory_id: str, vector: list[float], payload: dict) -> str:
         client = await self._get_client()

@@ -286,7 +286,8 @@ async def _async_extraction_and_update(
             "extraction_done": True,
             **(metadata or {}),
         }
-        vector = await store_obj.embed(content)
+        six_w = extraction.get("6w", {})
+        vector = await store_obj.embed_enhanced(content, six_w)
         if vector:
             await store_obj.upsert(memory_id, vector, updated_payload)
     except Exception as e:
