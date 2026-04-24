@@ -27,8 +27,9 @@ USER_PROMPT_TEMPLATE = "提取以下文本的结构化信息：\n```\n{content}\
 
 
 class LLMExtractor:
-    def __init__(self, ollama_url: str = "http://localhost:11434/api/generate"):
+    def __init__(self, ollama_url: str = "http://localhost:11434/api/generate", model: str = "qwen3.5:4b"):
         self.ollama_url = ollama_url
+        self.model = model
         self._client: httpx.AsyncClient | None = None
 
     async def _get_client(self) -> httpx.AsyncClient:
@@ -47,7 +48,7 @@ class LLMExtractor:
             resp = await client.post(
                 self.ollama_url,
                 json={
-                    "model": "qwen2.5",
+                    "model": self.model,
                     "prompt": prompt,
                     "stream": False,
                     "options": {"temperature": 0.1},

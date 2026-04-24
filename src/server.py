@@ -40,6 +40,8 @@ DEFAULT_EMBEDDING_URL = os.getenv("EMBEDDING_URL", "http://localhost:11434/api/e
 DEFAULT_EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "bge-m3")
 DEFAULT_EMBEDDING_DIM = int(os.getenv("EMBEDDING_DIM", "1024"))
 DEFAULT_OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434/api/generate")
+DEFAULT_LLM_MODEL = os.getenv("LLM_MODEL", "qwen3.5:4b")
+DEFAULT_LLM_WARMUP_INTERVAL = int(os.getenv("LLM_WARMUP_INTERVAL", "0"))
 
 app = FastAPI(title="Memory Recall Server")
 app.add_middleware(
@@ -81,6 +83,15 @@ graph_store: Any = None
 llm_extractor: Any = None
 
 
+async def _warmup_llm(url: str, model: str) -> None:
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.post(url, json={"model": model, "prompt": "."})
+            log.info(f"[warmup] {model} loaded: {resp.status_code == 200}")
+    except Exception as e:
+        log.warning(f"[warmup] failed to warmup {model}: {e}")
+
+
 async def get_services():
     global qdrant_store, bm25_index, graph_store, llm_extractor
     if qdrant_store is None:
@@ -101,7 +112,9 @@ async def get_services():
 
         bm25_index = BM25Index(index_file=str(BM25_INDEX_FILE))
         graph_store = GraphStore(graph_file=str(GRAPH_FILE))
-        llm_extractor = LLMExtractor(ollama_url=DEFAULT_OLLAMA_URL)
+        llm_extractor = LLMExtractor(ollama_url=DEFAULT_OLLAMA_URL, model=DEFAULT_LLM_MODEL)
+
+        await _warmup_llm(DEFAULT_OLLAMA_URL, DEFAULT_LLM_MODEL)
 
     return qdrant_store, bm25_index, graph_store, llm_extractor
 
