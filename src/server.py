@@ -143,41 +143,33 @@ async def recall(req: RecallRequest):
     l1_results = await store.vector_search(query, limit=req.max_results * 3)
     log.info(f"[/recall] L1 vector: {len(l1_results)} candidates")
 
-    l2_results = await bm25.search(query, top_k=req.max_results * 2)
-    l2_ids = {r["id"] for r in l2_results}
-    l1_ids = {r["id"] for r in l1_results}
-    combined_ids = list(l1_ids | l2_ids)
+    l2_results = bm25.search(query, top_k=req.max_results * 2)
+    log.info(f"[/recall] L2 BM25: {len(l2_results)} candidates")
 
-    if len(combined_ids) > req.max_results:
-        l1_map = {r["id"]: r.get("score", 0) for r in l1_results}
-        l2_map = {r["id"]: r.get("score", 0) for r in l2_results}
-        merged = []
-        for mid in combined_ids:
-            s1 = l1_map.get(mid, 0)
-            s2 = l2_map.get(mid, 0)
-            score = 0.7 * s1 + 0.3 * s2
-            merged.append((mid, score))
-        merged.sort(key=lambda x: x[1], reverse=True)
-        combined_ids = [mid for mid, _ in merged[: req.max_results]]
+    l1_map = {r["id"]: r.get("score", 0) for r in l1_results}
+    l2_map = {r["id"]: r.get("score", 0) for r in l2_results}
+    all_ids = set(l1_map.keys()) | set(l2_map.keys())
 
-    l3_expanded = await graph.expand(combined_ids, depth=2, top_k=req.max_results)
+    scored: list[tuple[str, float]] = []
+    for mid in all_ids:
+        s1 = l1_map.get(mid, 0)
+        s2 = l2_map.get(mid, 0)
+        score = 0.7 * s1 + 0.3 * s2
+        scored.append((mid, score))
+    scored.sort(key=lambda x: x[1], reverse=True)
+
+    l3_expanded = graph.expand([mid for mid, _ in scored[: req.max_results * 2]], depth=2, top_k=req.max_results)
     l3_ids = set(l3_expanded.keys())
+    for mid in l3_ids:
+        if mid not in l1_map and mid not in l2_map:
+            scored.append((mid, l3_expanded[mid] * 0.5))
+    scored.sort(key=lambda x: x[1], reverse=True)
 
-    all_ids = list(set(combined_ids) | l3_ids)
-    all_scores = {}
-    for mid in combined_ids:
-        all_scores[mid] = merged[next(i for i, (m, _) in enumerate(merged) if m == mid)][1] if mid in l1_ids or mid in l2_ids else 0.5
-    for mid, score in l3_expanded.items():
-        if mid not in all_scores:
-            all_scores[mid] = score * 0.5
-
-    final_ids = sorted(all_ids, key=lambda mid: all_scores.get(mid, 0), reverse=True)[: req.max_results]
-
+    final_ids = [mid for mid, _ in scored[: req.max_results]]
     memories = await store.fetch_by_ids(final_ids)
-    memories.sort(key=lambda m: all_scores.get(m.get("id", ""), 0), reverse=True)
-
+    score_map = dict(scored)
     for m in memories:
-        m["relevance_score"] = round(all_scores.get(m.get("id", ""), 0), 4)
+        m["relevance_score"] = round(score_map.get(m.get("id", ""), 0), 4)
 
     filtered = [m for m in memories if m.get("relevance_score", 0) >= req.min_score]
 
@@ -187,9 +179,10 @@ async def recall(req: RecallRequest):
         "layers": {
             "l1": len(l1_results),
             "l2": len(l2_results),
-            "l3": len(l3_ids),
+            "l3": len(l3_expanded),
         },
     }
+
 
 
 @app.post("/store")
@@ -231,14 +224,14 @@ async def store(req: StoreRequest):
     }
 
     stored_id = await store.upsert(memory_id, vector, payload)
-    await bm25.add(memory_id, req.content)
+    bm25.add(memory_id, req.content)
 
     graph.add_node(memory_id, payload)
     if req.metadata and req.metadata.get("conversation_id"):
         graph.add_session_edge(memory_id, conversation_id)
 
     l1_results_for_graph = await store.vector_search(req.content, limit=5)
-    graph.build_recall_edges(memory_id, [r["id"] for r in l1_results_for_graph])
+    graph.build_recall_edges(memory_id, [r["id"] for r in l1_results_for_graph if r.get("id")])
 
     return {
         "memory_id": stored_id,
@@ -256,7 +249,7 @@ async def forget(req: ForgetRequest):
 
     log.info(f"[/forget] id={req.memory_id}")
     await store.delete(req.memory_id)
-    await bm25.remove(req.memory_id)
+    bm25.remove(req.memory_id)
     graph.remove_node(req.memory_id)
 
     return {"memory_id": req.memory_id, "deleted": True}
@@ -281,7 +274,7 @@ async def update(req: UpdateRequest):
         new_vector = await store.embed(new_content)
         if new_vector:
             await store.upsert(req.memory_id, new_vector, new_metadata)
-        await bm25.update(req.memory_id, new_content)
+        bm25.update(req.memory_id, new_content)
 
         try:
             extraction = await extractor.extract(new_content)

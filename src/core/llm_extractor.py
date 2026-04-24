@@ -11,34 +11,19 @@ log = logging.getLogger("llm-extractor")
 
 CATEGORIES = ["preference", "fact", "decision", "entity", "reflection", "other"]
 
-SYSTEM_PROMPT = """你是一个记忆提取助手。从用户输入中提取结构化信息。
+SYSTEM_PROMPT = (
+    "你是一个记忆提取助手。从用户输入中提取结构化信息。\n\n"
+    "输出格式（JSON）：\n"
+    '{ "category": "preference|fact|decision|entity|reflection|other",\n'
+    '  "6w": { "who": "人物/角色", "what": "核心事件/内容", "when": "时间", "where": "地点", "why": "原因", "how": "方式" },\n'
+    '  "importance": 0.0-1.0 }\n\n'
+    "规则：\n"
+    "- category: preference=用户偏好, fact=客观事实, decision=决定计划, entity=实体, reflection=反思, other=其他\n"
+    "- importance: 0.3以下=闲聊, 0.3-0.6=普通, 0.6-0.8=重要, 0.8-1.0=关键\n"
+    "- 没有对应信息则留空"
+)
 
-输出格式（JSON）：
-{
-  "category": "preference|fact|decision|entity|reflection|other",
-  "6w": {
-    "who": "人物/角色",
-    "what": "核心事件/内容",
-    "when": "时间（如果有）",
-    "where": "地点（如果有）",
-    "why": "原因/动机（如果有）",
-    "how": "方式/方法（如果有）"
-  },
-  "importance": 0.0-1.0
-}
-
-规则：
-- category 判断：
-  * preference: 用户偏好、喜好、习惯（我更喜欢.../我不喜欢...）
-  * fact: 客观事实、知识、定义
-  * decision: 决定、计划、目标
-  * entity: 实体、人物、项目、技术名词
-  * reflection: 反思、总结、感悟
-  * other: 不属于以上
-- importance: 0.3 以下=日常闲聊，0.3-0.6=普通信息，0.6-0.8=重要信息，0.8-1.0=关键决策
-- 如果没有对应字段的信息，设为空字符串""""""
-
-USER_PROMPT_TEMPLATE = '提取以下文本的结构化信息：\n"""\n{content}\n"""'
+USER_PROMPT_TEMPLATE = "提取以下文本的结构化信息：\n```\n{content}\n```"
 
 
 class LLMExtractor:

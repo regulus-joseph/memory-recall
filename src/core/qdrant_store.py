@@ -179,10 +179,11 @@ class QdrantStore:
             return []
         client = await self._get_client()
         resp = await client.post(
-            f"{self.base_url}/collections/{self.collection}/points/{','.join(memory_ids)}",
-            params={"with_payload": "true"},
+            f"{self.base_url}/collections/{self.collection}/points",
+            json={"ids": memory_ids, "with_payload": True},
         )
         if resp.status_code not in (200, 201):
+            log.warning(f"fetch_by_ids failed: {resp.status_code} {resp.text[:200]}")
             return []
         data = resp.json()
         points = data.get("result", [])
@@ -207,13 +208,14 @@ class QdrantStore:
 
     async def count(self) -> int:
         client = await self._get_client()
-        resp = await client.get(
+        resp = await client.post(
             f"{self.base_url}/collections/{self.collection}/points/count",
-            params={"exact": "true"},
+            json={"exact": True},
         )
         if resp.status_code == 200:
             data = resp.json()
             return data.get("result", {}).get("count", 0)
+        return 0
         return 0
 
     async def close(self) -> None:

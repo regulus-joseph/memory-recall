@@ -8,12 +8,8 @@ import re
 from pathlib import Path
 from typing import Any
 
-try:
-    import jieba
-    JIEBA_AVAILABLE = True
-except ImportError:
-    JIEBA_AVAILABLE = False
-    jieba = None
+JIEBA_AVAILABLE = False
+jieba = None
 
 try:
     from rank_bm25 import BM25Okapi
@@ -66,13 +62,20 @@ class BM25Index:
         tokens = []
         english = re.findall(r"[a-zA-Z]+", text)
         tokens.extend([w.lower() for w in english if len(w) > 1])
-        chinese = re.findall(r"[\u4e00-\u9fff]+", text)
-        for chars in chinese:
-            for i in range(len(chars) - 1):
-                tokens.append(chars[i : i + 2])
-            if len(chars) >= 3:
-                for i in range(len(chars) - 2):
-                    tokens.append(chars[i : i + 3])
+        chinese_segments = re.findall(r"[\u4e00-\u9fff]+", text)
+        for chars in chinese_segments:
+            if len(chars) <= 2:
+                tokens.append(chars)
+            else:
+                seen = set()
+                for n in (2, 3):
+                    for i in range(len(chars) - n + 1):
+                        tok = chars[i : i + n]
+                        if tok not in seen:
+                            tokens.append(tok)
+                            seen.add(tok)
+                tokens.append(chars[:4])
+                tokens.append(chars[-4:])
         return tokens
 
     def _rebuild(self) -> None:
@@ -128,12 +131,11 @@ class BM25Index:
 
         results = []
         for doc_id, score in scored[:top_k]:
-            if score > 0:
-                results.append({
-                    "id": doc_id,
-                    "score": round(score, 4),
-                    "content": self.corpus.get(doc_id, ""),
-                })
+            results.append({
+                "id": doc_id,
+                "score": round(score, 4),
+                "content": self.corpus.get(doc_id, ""),
+            })
         return results
 
     def doc_count(self) -> int:
