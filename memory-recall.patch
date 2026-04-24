@@ -1,0 +1,2235 @@
+diff --git a/COMPARISON.md b/COMPARISON.md
+new file mode 100644
+index 0000000..79744dc
+--- /dev/null
++++ b/COMPARISON.md
+@@ -0,0 +1,393 @@
++# memory-recall 功能对比分析
++
++> 文档版本：v1.0
++> 日期：2026-04-24
++> 比对项目：MemPalace、memory-lancedb-pro（MLP）、memory-recall（改造前）
++
++---
++
++## 总览
++
++| 维度 | MemPalace | MLP (memory-lancedb-pro) | memory-recall (现状) |
++|------|-----------|--------------------------|-------------------|
++| **定位** | Claude Code / Codex MCP 外挂 | OpenClaw 插件，填入 memory slot | OpenClaw 插件，未接入 slot |
++| **存储后端** | ChromaDB + SQLite KG | LanceDB + FTS | Qdrant |
++| **检索架构** | L0/L1/L2/L3 分层注入 | Hybrid（Vector + BM25 + Rerank） | L1/L2/L3 cascade（实现有 bug） |
++| **工具数** | 27 个 MCP tools | ~13 个 tools | 1 个（`recall_memories`） |
++| **Hook 数** | 3 个（Claude Code hooks） | 15+ 个（OpenClaw hooks） | 3 个（有 bug） |
++| **CLI** | `mempalace` | `openclaw memory-pro` | `python -m memory_recall.cli` |
++| **Graph** | 有（SQLite KG + tunnels） | 无独立图谱 | L3 是 stub，graph_edges 未填充 |
++| **Entity 提取** | AAAK dialect + 实体检测 | Smart extraction（LLM） | 6W regex（extractor.py，未在 TS 使用） |
++| **Agent 隔离** | wing/room/hall 多层 | scope（global/agent/session） | agent_id 字段（未隔离查询） |
++| **遗忘机制** | delete + kg_invalidate | forget + archive + compact | delete（Qdrant delete API 有 bug） |
++
++---
++
++## 1. 存储后端对比
++
++| | MemPalace | MLP | memory-recall |
++|--|-----------|-----|--------------|
++| **向量库** | ChromaDB（hnsw, cosine） | LanceDB（ANN + FTS） | Qdrant（hnsw, cosine） |
++| **KG 存储** | SQLite | 无（用 scope 代替） | 无 |
++| **Graph 存储** | JSON（tunnels.json） | 无 | payload 内 graph_edges（未填充） |
++| ** WAL** | ~/.mempalace/wal/write_log.jsonl | 无 | 无 |
++| **批量写入** | bulk upsert | bulkStore + proper-lockfile | 单条 PUT |
++| **后端可替换** | 是（BaseBackend 接口） | 否 | 否 |
++
++**memory-recall 问题：**
++- Qdrant delete API 用法错误：`points_selector=[memory_id]` 应为 `PointIdsList(points=[memory_id])`
++- scroll 返回 payload 丢失 point ID（ID 不在 payload 里）
++- 无连接池，每次 recall 新建 QdrantClient
++
++---
++
++## 2. 检索 cascade 对比
++
++### MemPalace（分层加载，非 cascade）
++
++```
++wake-up 时：
++  L0: ~/.mempalace/identity.txt  → ~100 tokens（始终加载）
++  L1: ChromaDB top-15 importance 排序  → ~500-800 tokens（始终加载）
++  L2: 按 wing/room 过滤 ChromaDB  → ~200-500 tokens（按需）
++  L3: 全文向量检索  → 无限制（按需）
++
++搜索时：BM25 + 向量混合排序
++  drawer hits → closet boost
++```
++
++### MLP（向量 + BM25 + Cross-Encoder）
++
++```
++1. Vector Search (cosine, 20x over-fetch)
++2. BM25 Search (LanceDB FTS)
++3. RRF Fusion: score = 0.7*vector + 0.3*bm25
++4. Cross-Encoder Rerank（可选）
++5. Post-processing:
++   - recency boost
++   - importance weight
++   - length norm
++   - time decay
++   - noise filter
++   - MMR diversity
++```
++
++### memory-recall（现状 L1/L2/L3 有 bug）
++
++```
++当前（错误）：
++  L1: keyword Jaccard（从 scroll 全量数据）
++  L2: vector cosine（embedding）
++  L3: graph edge traversal（条件触发）
++
++计划（改造后）：
++  L1: embedding 向量检索
++  L2: BM25 关键词检索
++  L3: graph 关联扩展（graphify）
++```
++
++**memory-recall L1/L2/L3 关键 bug：**
++- `_fetch_all_candidates()` 从 Qdrant scroll 全量拉回数据（无 filter，无 limit）
++- scroll 返回 payload 不含 point ID → L1 filter 用 `c["id"]` 永远匹配不上 → **L1 结果永远为空**
++- `l1_results` 为空直接传给 L2 → L2 对空列表操作
++- L2 embedding 逐条串行调用 Ollama（1000 条 = 1000 次 HTTP）
++- L3 条件触发但 graph_edges 未填充 → 几乎不生效
++
++---
++
++## 3. 工具对比
++
++### MemPalace（27 个 MCP tools）
++
++**读取类（15 个）：**
++- `mempalace_search` — 语义检索
++- `mempalace_get_drawer` / `mempalace_list_drawers` — 按 ID/分页
++- `mempalace_traverse` — BFS 图遍历
++- `mempalace_find_tunnels` — 找跨 wing 桥梁
++- `mempalace_kg_query` / `kg_timeline` / `kg_stats` — 知识图谱查询
++- `mempalace_diary_read` — 日记读取
++- `mempalace_status` / `list_wings` / `list_rooms` / `get_taxonomy` — 元信息
++- `mempalace_graph_stats` / `follow_tunnels` / `check_duplicate` / `memories_filed_away` — 工具
++
++**写入类（8 个）：**
++- `mempalace_add_drawer` — 添加记忆抽屉
++- `mempalace_delete_drawer` / `update_drawer` — 删除/更新
++- `mempalace_kg_add` / `kg_invalidate` — KG 增/删
++- `mempalace_diary_write` — 写日记
++- `create_tunnel` / `delete_tunnel` — 建/删 tunnel
++- `reconnect` — 重连 ChromaDB
++
++### MLP（~13 个 tools）
++
++**核心 tools（始终启用）：**
++| 工具 | 功能 |
++|------|------|
++| `memory_recall` | 混合检索召回 |
++| `memory_store` | 存储记忆（含去重/超新版本/6-category） |
++| `memory_forget` | 按 ID/查询删除 |
++| `memory_update` | 更新记忆内容 |
++
++**管理 tools（enableManagementTools）：**
++| 工具 | 功能 |
++|------|------|
++| `memory_stats` | 统计（数量/分布） |
++| `memory_debug` | 检索 pipeline trace |
++| `memory_list` | 分页列表 |
++| `memory_promote` | 提升为 confirmed/durable |
++| `memory_archive` | 归档（state=archived） |
++| `memory_compact` | 压缩合并重复记忆 |
++| `memory_explain_rank` | 解释排名原因 |
++
++**自我改进 tools：**
++| 工具 | 功能 |
++|------|------|
++| `self_improvement_log` | 记录学习/错误到 .learnings |
++| `self_improvement_extract_skill` | 从 learning 提取 skill scaffold |
++| `self_improvement_review` | 回顾 governance backlog |
++
++### memory-recall（现状 1 个）
++
++| 工具 | 功能 |
++|------|------|
++| `recall_memories` | 向量检索（简化版，未调用 cascade） |
++
++**缺失：** 无 store / forget / update / stats / list / debug
++
++---
++
++## 4. Hook 对比
++
++### MemPalace（Claude Code hooks，3 个）
++
++| Hook | 时机 | 功能 |
++|------|------|------|
++| `mempal_precompact_hook.sh` | context compaction 前 | 自动挖掘 transcript，触发紧急保存 |
++| `mempal_save_hook.sh` | 每 15 条人类消息 | 静默模式直接写 MCP，verbose 模式阻塞通知 |
++| `hook_session_start` | session 开始 | 初始化 session 跟踪状态 |
++
++### MLP（OpenClaw hooks，15+ 个）
++
++| Hook | 时机 | 功能 | 优先级 |
++|------|------|------|--------|
++| `message_received` | 收到消息 | 缓存 ingress 映射 | default |
++| `before_message_write` | 消息写入前 | 调试日志 | default |
++| `before_prompt_build` | prompt 构建前 | **Auto-Recall**（完整 pipeline + adaptive） | 10 |
++| `before_prompt_build` | prompt 构建前 | **Reflection-Inheritance** | 12 |
++| `before_prompt_build` | prompt 构建前 | **Reflection-Derived** | 15 |
++| `session_end` | session 结束 | 清理 recallHistory / reflection 缓存 | 10/20 |
++| `agent_end` | agent 结束 | **Auto-Capture**（fire-and-forget） | default |
++| `after_tool_call` | tool 调用后 | 捕获错误信号到 reflection | 15 |
++| `before_reset` | reset 前 | system session memory 存档 | default |
++| `gateway_start` | gateway 启动 | 自动 compaction | default |
++| `command:new` | /new 命令 | 完整 reflection pipeline | — |
++| `command:reset` | /reset 命令 | 完整 reflection pipeline | — |
++| `agent:bootstrap` | agent 启动 | 注入 self-improvement reminder | — |
++| `command:new` | /new 命令 | self-improvement 引导 | — |
++
++### memory-recall（现状 3 个，有 bug）
++
++| Hook | 时机 | 功能 | 问题 |
++|------|------|------|------|
++| `message_received` | 收到消息 | 存到 Qdrant | TS 未用 extractor，无 6W 提取 |
++| `agent_end` | agent 结束 | 存 assistant 消息 | 同上 |
++| `before_agent_start` | agent 启动前 | auto-recall | **事件名错误**，应为 `before_prompt_build` |
++
++**另有：** `src/openclaw/interceptor.py` 有 `before_prompt_build` hook（Python），但与 TS 版本并存，未统一。
++
++---
++
++## 5. Payload 结构对比
++
++### MemPalace
++
++```
++Drawer (ChromaDB):
++{
++  content: string,
++  wing: string,      // project/person
++  room: string,       // aspect/topic
++  hall: string,       // corridor category
++  source_file: string,
++  chunk_index: number,
++  added_by: "mcp",
++  filed_at: ISO8601,
++  date: "YYYY-MM-DD"
++}
++
++Drawer ID: drawer_{wing}_{room}_{sha256(wing+room+content)[:24]}
++
++KG Triple (SQLite):
++{
++  subject, predicate, object,
++  valid_from, valid_to,
++  confidence, source_closet,
++  source_drawer_id
++}
++```
++
++### MLP
++
++```
++MemoryEntry (LanceDB):
++{
++  id: UUID,
++  text: string,
++  vector: float[],
++  category: preference|fact|decision|entity|reflection|other,
++  scope: string,       // global|agent:{id}|session:{id}|...
++  importance: 0-1,
++  timestamp: ms_epoch,
++  metadata: JSON (L0_abstract, L1_overview, L2_content, state, memory_layer, access_count, bad_recall_count, ...)
++}
++```
++
++### memory-recall
++
++```
++Qdrant Point:
++{
++  vector: float[1024],
++  payload: {
++    content: string,
++    category: "preference"|"fact"|"decision"|"entity"|"other"|"reflection",  // TS 未填
++    6w: { who, what, when, where, why, how },  // TS 未填，extractor.py 有但未调用
++    agent_id: string,
++    scope: string,
++    importance: 0-1,
++    stored_at: ISO8601,
++    graph_edges: [],  // 从未填充
++    state: "confirmed",
++    access_count: 0,
++    last_accessed: ISO8601,
++    role: "user"|"assistant",  // TS auto-store 专用
++    sender: string,
++    channel_id: string,
++    conversation_id: string
++  }
++}
++```
++
++---
++
++## 6. Agent 隔离对比
++
++| | MemPalace | MLP | memory-recall |
++|--|-----------|-----|--------------|
++| **隔离维度** | wing / room / hall 三层 | scope: global / agent:{id} / session:{id} | agent_id 字段（未实现过滤） |
++| **访问控制** | wing/room metadata filter | ScopeManager.isAccessible() | 无 |
++| **默认 scope** | wing=user-provided | agent:{agentId} | 无 |
++
++---
++
++## 7. 遗忘机制对比
++
++| | MemPalace | MLP | memory-recall |
++|--|-----------|-----|--------------|
++| **删除** | delete_drawer（物理删除） | delete（物理） | Qdrant delete（有 bug） |
++| **软删** | kg_invalidate（valid_to=今天） | archive（state=archived） | 无 |
++| **压缩** | compress（AAAK 压缩） | memory_compact（相似度聚类归档） | 无 |
++| **去重** | idempotent SHA ID | vector similarity pre-check | 无 |
++
++---
++
++## 8. 关键发现总结
++
++### memory-recall 现状的核心问题
++
++| 优先级 | 问题 | 影响 |
++|--------|------|------|
++| **P0** | L1 Jaccard 用 `c["id"]` 但 scroll payload 不含 ID | L1 结果永远为空 |
++| **P0** | L2 逐条 embedding（1000 candidates = 1000 HTTP） | recall 超慢 |
++| **P0** | Qdrant delete API 格式错误 | forget 工具不可用 |
++| **P0** | TS 用 `before_agent_start`，应为 `before_prompt_build` | Hook 不触发 |
++| **P1** | TS auto-store 未调用 extractor.py | 无 6W / category 字段 |
++| **P1** | graph_edges 从未填充 | L3 形同虚设 |
++| **P1** | TS 未注册 stub registerMemoryRuntime | doctor 检查不过 |
++| **P2** | ID 用 Date.now()（毫秒级冲突） | 多消息可能覆盖 |
++| **P2** | TS 硬编码 embedding URL | config.baseURL 被忽略 |
++
++### 功能差距
++
++| 功能 | MLP 有 | memory-recall 缺 |
++|------|--------|-----------------|
++| 多工具 | ~13 个 | 1 个 |
++| store / forget / update | 是 | 缺 |
++| BM25 检索 | 是（LanceDB FTS） | TS 缺（Python 有但 L2 是向量） |
++| Cross-Encoder Rerank | 是 | 缺 |
++| 自我改进 tools | 是 | 缺 |
++| compaction / archive | 是 | 缺 |
++| reflection pipeline | 是 | 缺 |
++| scope 隔离 | 是 | 形同虚设 |
++| 管理 CLI | 是 | 缺 |
++| 存储抽象层 | 否 | 否（硬编码 Qdrant） |
++
++---
++
++## 9. 最终架构决策（2026-04-24）
++
++### 方案选定：Python HTTP Service + TS Plugin（方案 B）
++
++经过讨论，决定采用 **Python 层** 作为原型路径，原因：
++1. **完整性**：Python 有 jieba（中文分词）、rank_bm25、networkx（graphify），TS 无对等替代
++2. **可调试**：graphify 提供可视化图，调试 graph 关系直观
++3. **LLM extraction**：6W + category 提取在 Python 侧调用 Ollama 更自然
++4. **先验证后优化**：原型用 Python 验证 cascade + graph 价值，验证有效后考虑 TS 化
++
++### 最终架构
++
++```
++memory-recall (改造后)
++  ├── TypeScript plugin (OpenClaw)
++  │     ├── 4 核心 tools (recall/store/forget/update)
++  │     ├── 3 hooks (message_received / agent_end / before_prompt_build)
++  │     └── stub registerMemoryRuntime
++  │
++  └── Python service (src/server.py)
++        ├── L1: vector embedding search (Qdrant)
++        ├── L2: BM25 + jieba keyword search
++        ├── L3: graphify graph expansion
++        ├── BM25 index (file: bm25_index.json)
++        ├── graph (file: memory_graph.json)
++        └── LLM extraction (Ollama): 6W + category
++```
++
++### 技术选型
++
++| 组件 | 技术 | 理由 |
++|------|------|------|
++| 向量存储 | Qdrant | 用户已有，无需迁移 |
++| BM25 + 分词 | Python jieba + rank_bm25 | 中文支持完整 |
++| Graph | Python graphify (networkx) | 可视化调试方便 |
++| LLM 调用 | Python 调用 Ollama | 6W / category 提取 |
++| 插件层 | TS plugin (OpenClaw) | 接入 OpenClaw 生态 |
++
++### 改造优先级
++
++```
++v0.2.0（Phase 1 - Python HTTP Service）：
++  P0:
++    1. 新建 src/server.py（/recall, /store, /forget, /update HTTP API）
++    2. 修 Qdrant API bug（delete / scroll ID）
++    3. 迁移 src/core/matcher.py 的 L1/L2/L3 到 server.py
++    4. 新建 BM25 index（jieba + rank_bm25）
++  P1:
++    5. 重写 src/index.ts（4 tools 调用 server.py HTTP）
++    6. 修 TS hook 事件名 + 注册 stub
++    7. 实现 LLM 提取 6W + category（Ollama 调用）
++
++v0.3.0（Phase 2 - Graph + Compaction）：
++  8. graphify 集成（L3 graph expansion + 可视化）
++  9. 实现 compaction Hook（before_compaction + graph 更新）
++  10. graph_edges 填充逻辑（session 共现 + recall 共现）
++  11. BM25 index 增量更新
++
++v0.4.0（Phase 3 - 功能完善）：
++  12. 管理 tools（stats/debug/list）
++  13. scope 隔离实现
++  14. agent_id 过滤
++  15. CLI 命令完善
++```
++
++---
++
++## 10. 改造优先级建议
+diff --git a/COMPARISON.md:Zone.Identifier b/COMPARISON.md:Zone.Identifier
+new file mode 100644
+index 0000000..d6c1ec6
+Binary files /dev/null and b/COMPARISON.md:Zone.Identifier differ
+diff --git a/OPENCLAW_PLUGIN_HOOK_SYSTEM.md b/OPENCLAW_PLUGIN_HOOK_SYSTEM.md
+new file mode 100644
+index 0000000..aa75212
+--- /dev/null
++++ b/OPENCLAW_PLUGIN_HOOK_SYSTEM.md
+@@ -0,0 +1,374 @@
++# OpenClaw Plugin & Hook System 分析文档
++
++## 1. 概述
++
++OpenClaw 的插件系统和 Hook 系统是两个独立但相互关联的核心扩展机制：
++
++- **插件系统（Plugin）**：通过 `openclaw.plugin.json` manifest 声明，通过 `OpenClawPluginApi` 注册工具、Provider、命令、HTTP 路由等
++- **Hook 系统（Hook）**：事件驱动的回调机制，用于在 agent 生命周期中注入逻辑
++- **工具系统（Tool）**：通过插件注册，由 AI 模型在运行时调用
++
++---
++
++## 2. OpenClawPluginApi 注册方法（完整列表）
++
++插件通过 `index(pluginApi)` 入口函数获得 `OpenClawPluginApi` 对象，可调用的注册方法：
++
++### 2.1 Hook 事件注册
++
++| 方法 | 说明 |
++|------|------|
++| `api.on(hookName, handler, opts?)` | 强类型 Hook 注册（推荐） |
++| `api.registerHook(events, handler, opts?)` | 底层 Hook 注册，支持多事件 |
++
++### 2.2 工具注册
++
++| 方法 | 说明 |
++|------|------|
++| `api.registerTool(tool, opts?)` | 注册 agent 工具 |
++
++### 2.3 HTTP 路由
++
++| 方法 | 说明 |
++|------|------|
++| `api.registerHttpRoute(routeParams)` | 注册 HTTP 路由，支持 `gateway` / `plugin` 两种认证模式 |
++
++### 2.4 Provider 注册
++
++| 方法 | 说明 |
++|------|------|
++| `api.registerProvider(provider)` | 通用 Provider |
++| `api.registerSpeechProvider(provider)` | 语音合成 |
++| `api.registerRealtimeTranscriptionProvider(provider)` | 实时转录 |
++| `api.registerRealtimeVoiceProvider(provider)` | 实时语音 |
++| `api.registerMediaUnderstandingProvider(provider)` | 媒体理解 |
++| `api.registerImageGenerationProvider(provider)` | 图片生成 |
++| `api.registerVideoGenerationProvider(provider)` | 视频生成 |
++| `api.registerMusicGenerationProvider(provider)` | 音乐生成 |
++| `api.registerWebFetchProvider(provider)` | Web 获取 |
++| `api.registerWebSearchProvider(provider)` | Web 搜索 |
++
++### 2.5 其他扩展
++
++| 方法 | 说明 |
++|------|------|
++| `api.registerChannel(registration)` | 注册 channel 插件 |
++| `api.registerAgentHarness(harness)` | 注册自定义 agent harness |
++| `api.registerGatewayMethod(method, handler, opts?)` | 注册 gateway RPC 方法 |
++| `api.registerService(service)` | 注册后台服务 |
++| `api.registerCli(registrar, opts?)` | 注册 CLI 命令 |
++| `api.registerCliBackend(backend)` | 注册 CLI 后端 |
++| `api.registerCommand(command)` | 注册 gateway 命令 |
++| `api.registerTextTransforms(transforms)` | 注册文本转换（input/output） |
++| `api.registerReload(registration)` | 注册插件热重载前缀 |
++| `api.registerNodeHostCommand(command)` | 注册 Node host 命令 |
++| `api.registerSecurityAuditCollector(collector)` | 注册安全审计收集器 |
++| `api.registerInteractiveHandler(registration)` | 注册交互式处理器 |
++| `api.registerContextEngine(id, factory)` | 注册 context engine 工厂 |
++| `api.registerCompactionProvider(provider)` | 注册内存压缩 Provider |
++| `api.registerEmbeddedExtensionFactory(factory)` | 注册 Pi 嵌入式扩展工厂（仅 bundled） |
++| `api.registerCodexAppServerExtensionFactory(factory)` | 注册 Codex app-server 扩展工厂（仅 bundled） |
++| `api.onConversationBindingResolved(handler)` | 注册会话绑定解析处理器 |
++| `api.registerDetachedTaskRuntime(runtime)` | 注册 detached task 生命周期运行时 |
++| `api.registerMemoryCapability(capability)` | 注册内存能力（仅 memory 插件） |
++| `api.registerMemoryPromptSection(builder)` | 注册内存 prompt section（仅 memory 插件） |
++| `api.registerMemoryPromptSupplement(builder)` | 注册内存 prompt 补充 |
++| `api.registerMemoryCorpusSupplement(supplement)` | 注册内存语料补充 |
++| `api.registerMemoryFlushPlan(resolver)` | 注册内存 flush plan 解析器（仅 memory 插件） |
++| `api.registerMemoryRuntime(runtime)` | 注册内存运行时（仅 memory 插件） |
++| `api.registerMemoryEmbeddingProvider(provider)` | 注册内存嵌入 Provider |
++
++---
++
++## 3. Hook 系统架构
++
++### 3.1 两套独立的 Hook 系统
++
++OpenClaw 有两个完全独立的 Hook 实现：
++
++**系统 A：内部插件 Hook**（`src/hooks/internal-hooks.ts`）
++- 所有插件 Hook、workspace Hook、legacy 配置 Hook 汇聚于此
++- 通过 `triggerInternalHook(event, eventObj)` 触发
++
++**系统 B：外部 HTTP Webhook**（`src/gateway/hooks.ts`）
++- 完全独立，HTTP POST 到 `/hooks` 端点
++- 通过 `gateway.hooks.webhooks[]` 在 manifest 中声明
++
++### 3.2 内部 Hook 核心实现
++
++```typescript
++// 注册
++registerInternalHook(event: string, handler: InternalHookHandler, opts?): void
++unregisterInternalHook(event: string, handler: InternalHookHandler): void
++triggerInternalHook(event: string, eventObj: InternalHookEvent): Promise<void>
++
++// 类型定义
++type InternalHookHandler = (event: InternalHookEvent) => Promise<void> | void
++
++interface InternalHookEvent {
++  type: InternalHookEventType   // "command" | "session" | "agent" | "gateway" | "message"
++  action: string               // 动作名称，如 "new", "reset", "stop"
++  sessionKey: string           // 会话 key
++  context: Record<string, unknown>
++  timestamp: Date
++  messages: string[]           // Hook 可向此数组推送消息返回给用户
++}
++```
++
++**关键机制：**
++- **去重**：`_hookEventDedup` Set，key = `handlerName:sessionKey:timestamp`，最多 200 条
++- **防重入**：`_currentlyFiring` Map，同一 handler 不可重入
++- **优先级**：`options.priority`，数字越小越早执行（默认 0）
++- **超时**：单个 handler 超时 30000ms
++- **全局回滚**：`activePluginHookRegistrations` 全局 Map，存储每个 plugin 的 hook 注册，供热重载时回滚
++
++### 3.3 Hook 事件类型
++
++定义在 `src/hooks/internal-hooks.ts`：
++
++| 分类 | 事件 |
++|------|------|
++| **Agent** | `before_agent_start`, `after_agent_start`, `before_agent_end`, `after_agent_end` |
++| **Prompt** | `before_prompt_build`, `after_prompt_build` |
++| **Command** | `before_command_execute`, `after_command_execute` |
++| **Message** | `before_message_process`, `after_message_process`, `after_message_append` |
++| **Session** | `after_session_start`, `after_session_reset`, `after_session_stop` |
++| **Gateway** | `after_gateway_start`, `before_gateway_stop` |
++| **Tool** | `before_tool_call`, `after_tool_call` |
++| **Compaction** | `before_compaction`, `after_compaction` |
++| **Reset** | `before_reset`, `after_reset` |
++
++### 3.4 插件 Hook 注册流程
++
++```
++Plugin: api.on("before_prompt_build", handler, opts)
++  │
++  ├─ hook-types.ts: api.on() → handlers.registerHook(events, handler, opts)
++  │    └─ 内部调用 api.registerHook()
++  │
++  └─ registry.ts: registerHook() (line 358)
++       ├─ 存储到 registry.hooks[] = HookRegistration[]
++       │    HookEntry {
++       │      hook: { name, description, source="openclaw-plugin", pluginId, filePath, baseDir, handlerPath },
++       │      frontmatter: {},
++       │      metadata: { events },
++       │      invocation: { enabled: true }
++       │    }
++       ├─ 检查重复 hook name
++       ├─ 检查 config?.hooks?.internal?.enabled
++       ├─ activePluginHookRegistrations.set(name, nextRegistrations)  ← 跟踪用于回滚
++       └─ registerInternalHook(event, handler)  ← 挂载到内部 Hook 引擎
++            └─ internalHooks.get(event).push({ handler, options })
++```
++
++### 3.5 强类型 Hook vs 底层 Hook
++
++**强类型 Hook**（`api.on(hookName, handler)`）：
++- 使用 `PluginHookName` 类型，自动推断事件参数类型
++- 通过 `registerTypedHook()` 注册，存入 `registry.typedHooks[]`
++- 支持 `priority` 优先级和 `allowPromptInjection` 策略
++- 在 agent 循环中被按优先级顺序执行
++
++**底层 Hook**（`api.registerHook(events, handler, opts)`）：
++- 事件名是字符串，支持多事件注册
++- 事件对象是扁平的 `InternalHookEvent`
++
++### 3.6 Loader：第三种 Hook 来源
++
++`src/hooks/loader.ts`：`loadInternalHooks(config, workspaceDir)`
++- 加载自：workspace 目录、managed hooks、bundled hooks
++- 支持 legacy 配置格式（向后兼容）
++- 两者都通过 `registerInternalHook()` 注册，汇入同一 Hook 引擎
++
++---
++
++## 4. 工具注册与触发
++
++### 4.1 注册
++
++```typescript
++api.registerTool(tool: AnyAgentTool | OpenClawPluginToolFactory, opts?)
++```
++
++**工厂函数签名：**
++```typescript
++type OpenClawPluginToolFactory = (ctx: OpenClawPluginToolContext) => AnyAgentTool | AnyAgentTool[] | null | undefined
++```
++
++**工具上下文（OpenClawPluginToolContext）：**
++```typescript
++{
++  config?: OpenClawConfig            // 静态配置
++  runtimeConfig?: OpenClawConfig     // 运行时配置快照
++  fsPolicy?: ToolFsPolicy             // 文件系统安全策略
++  workspaceDir?: string              // 工作目录
++  agentDir?: string                  // agent 目录
++  agentId?: string                   // agent ID
++  sessionKey?: string                // 会话 key
++  sessionId?: string                 // 临时会话 UUID（/new 和 /reset 时重置）
++  browser?: {                        // 沙箱浏览器桥接
++    sandboxBridgeUrl?: string
++    allowHostControl?: boolean
++  }
++  messageChannel?: string            // 消息通道
++  agentAccountId?: string            // 账户 ID
++  deliveryContext?: DeliveryContext // 投递上下文
++  requesterSenderId?: string         // 信任的发送者 ID（来自入站上下文，非工具参数）
++  senderIsOwner?: boolean           // 发送者是否为 owner
++  sandboxed?: boolean               // 是否沙箱模式
++}
++```
++
++**注册结果存入：**
++```typescript
++registry.tools[] = PluginToolRegistration[]
++{
++  pluginId, pluginName, factory, names, optional, source, rootDir
++}
++```
++
++### 4.2 工具实例化时机
++
++工具采用**延迟实例化**策略——工厂函数不在插件加载时调用，而在 agent 每次运行时调用：
++
++```
++createOpenClawCodingTools()  ← agent 运行时
++  └─ createOpenClawTools()
++       └─ resolveOpenClawPluginToolsForOptions()
++            └─ resolvePluginTools()  ← 遍历 registry.tools[]
++                 └─ entry.factory(context)  ← 调用工厂函数
++```
++
++每次 agent 运行都会重新调用 `factory(context)`，确保工具获得最新的上下文信息（sessionId、fsPolicy 等）。
++
++### 4.3 工具元数据追踪
++
++工具元数据通过 WeakMap 关联：
++
++```typescript
++const pluginToolMeta = new WeakMap<AnyAgentTool, PluginToolMeta>()
++// PluginToolMeta = { pluginId: string, optional: boolean }
++```
++
++**用途 1：** `tools.effective` API — 判断工具来源（`core` / `plugin` / `channel`）
++**用途 2：** 策略管道 — `applyToolPolicyPipeline()` 使用 `toolMeta` 回调获取 `pluginId` 用于策略决策
++
++### 4.4 工具 Policy Pipeline
++
++工具组装完成后经过多层过滤：
++
++```
++registry.tools[].factory(context)  ← 实例化
++  → filterToolsByMessageProvider()        ← 按 channel 过滤
++  → applyModelProviderToolPolicy()         ← 按 model provider 过滤（如抑制 web_search）
++  → applyOwnerOnlyToolPolicy()            ← owner-only 工具
++  → applyToolPolicyPipeline()             ← profile/global/agent/group/sandbox/subagent 策略链
++  → normalizeToolParameters()             ← JSON Schema 规范化（Gemini 特殊处理）
++  → wrapToolWithBeforeToolCallHook()     ← 包装 before_tool_call / after_tool_call Hook
++  → wrapToolWithAbortSignal()            ← 包装 AbortSignal
++  → applyDeferredFollowupDescriptions()   ← 延迟描述符
++  → 返回最终工具列表给 AI 模型
++```
++
++---
++
++## 5. 插件生命周期
++
++### 5.1 加载流程
++
++```
++Gateway 启动
++  └─ loadInternalHooks(cfg, workspaceDir)  ← 加载 workspace/managed/bundled Hook
++  └─ 插件发现（通过 openclaw.plugin.json manifest）
++       └─ 验证 contracts 和 capabilities
++       └─ createPluginRegistry()  ← 创建本插件 registry
++            └─ createApi(record, params)  ← 构建 OpenClawPluginApi
++                 └─ buildPluginApi()  ← 组装 API 对象
++            └─ 调用 plugin.index(api)  ← 插件执行注册逻辑
++                 └─ api.registerTool() / api.on() / api.registerProvider() 等
++```
++
++### 5.2 PluginRuntime
++
++每个插件通过 `PluginRuntime` 代理访问核心功能：
++
++```typescript
++resolvePluginRuntime(pluginId): PluginRuntime
++  // 返回 registryParams.runtime 的 Proxy
++  // 对 .subagent 属性的访问自动注入 pluginId scope
++  // 其他属性直接透传
++```
++
++这确保插件的 subagent 操作自动带上插件 ID 标记。
++
++### 5.3 热重载支持
++
++- `activePluginHookRegistrations` 全局 Map 跟踪每个 hook 的注册
++- `registerReload(registration)` 允许插件声明 `restartPrefixes` / `hotPrefixes` / `noopPrefixes`
++- 卸载插件时自动回滚所有 hook 注册
++
++---
++
++## 6. 与 MLP 的集成
++
++MLP（Memory-LanceDB-Pro）作为 OpenClaw 插件，通过以下方式使用 Hook 系统：
++
++### 6.1 Hook 注册方式
++
++```typescript
++api.on("before_prompt_build", recallHandler, {
++  name: "mlp-recall",
++  description: "Retrieve relevant memories",
++  priority: 10,  // recall 最先执行
++})
++
++api.on("after_message_process", captureHandler, {
++  name: "mlp-capture",
++  description: "Capture messages into memory",
++  // fire-and-forget，不 await
++})
++
++api.on("after_agent_end", reflectionHandler, {
++  name: "mlp-reflection",
++  description: "Analyze and store reflections",
++  priority: 12,  // 在继承之后执行
++})
++```
++
++### 6.2 优先级约定（MLP）
++
++| 优先级 | Hook | 功能 |
++|--------|------|------|
++| 10 | before_prompt_build | recall（记忆召回） |
++| 12 | before_prompt_build | reflection_inheritance（反射继承） |
++| 15 | before_prompt_build | reflection_derived（衍生反射） |
++| — | after_message_process | capture（消息捕获） |
++| — | after_agent_end | reflection（反思分析） |
++
++### 6.3 MLP 不使用工具系统
++
++MLP 通过 Hook 系统实现，无需注册 agent 工具。所有记忆操作（recall / capture / reflection）都在 Hook handler 中完成。
++
++---
++
++## 7. 关键文件索引
++
++| 文件 | 职责 |
++|------|------|
++| `src/plugins/types.ts` | OpenClawPluginApi 接口定义（~2065 行） |
++| `src/plugins/api-builder.ts` | buildPluginApi — 组装 API 对象 |
++| `src/plugins/registry.ts` | createPluginRegistry — 插件注册逻辑中心 |
++| `src/plugins/registry-types.ts` | 注册类型定义 |
++| `src/plugins/tool-types.ts` | OpenClawPluginToolFactory / ToolContext |
++| `src/plugins/tools.ts` | resolvePluginTools — 工具解析入口 |
++| `src/plugins/registry-empty.ts` | createEmptyPluginRegistry — 初始化空 registry |
++| `src/hooks/internal-hooks.ts` | registerInternalHook / triggerInternalHook — Hook 引擎核心 |
++| `src/hooks/internal-hook-types.ts` | InternalHookHandler / InternalHookEvent 类型 |
++| `src/hooks/loader.ts` | loadInternalHooks — Hook 加载器 |
++| `src/hooks/hook-types.ts` | 插件可见的 Hook 类型导出 |
++| `src/gateway/hooks.ts` | 外部 HTTP Webhook 系统 |
++| `src/agents/tools-effective-inventory.ts` | resolveEffectiveToolInventory — 工具清单 API |
++| `src/agents/pi-tools.ts` | createOpenClawCodingTools — 工具组装主函数 |
++| `src/agents/openclaw-tools.ts` | createOpenClawTools — OpenClaw 内置工具 + 插件工具 |
++| `src/agents/openclaw-plugin-tools.ts` | resolveOpenClawPluginToolsForOptions — 插件工具解析入口 |
++| `packages/plugin-sdk/src/plugin-entry.ts` | 公共 SDK 导出入口 |
+diff --git a/OPENCLAW_PLUGIN_HOOK_SYSTEM.md:Zone.Identifier b/OPENCLAW_PLUGIN_HOOK_SYSTEM.md:Zone.Identifier
+new file mode 100644
+index 0000000..d6c1ec6
+Binary files /dev/null and b/OPENCLAW_PLUGIN_HOOK_SYSTEM.md:Zone.Identifier differ
+diff --git a/TRANSFORMATION_PLAN.md b/TRANSFORMATION_PLAN.md
+new file mode 100644
+index 0000000..53537e4
+--- /dev/null
++++ b/TRANSFORMATION_PLAN.md
+@@ -0,0 +1,782 @@
++# memory-recall 改造方案
++
++> 文档版本：v1.0
++> 最后更新：2026-04-24
++> 负责人：marlon-wei
++> 源码路径：~/projects/memory-recall
++
++---
++
++## 背景
++
++OpenClaw 支持多 memory 插件，但 `slots.memory` 只能选一个作为默认召回装置。
++
++**插件切换配置：**
++
++```json5
++{
++  plugins: {
++    slots: {
++      memory: "memory-recall"  // 选择 memory-recall 作为默认记忆系统
++    }
++  }
++}
++```
++
++**官方 memory 插件对照：**
++- `memory-core` — 默认内置，工具名：`memory_search` / `memory_get`
++- `memory-lancedb` — MLP（memory-lancedb-pro），工具名：`memory_recall` / `memory_store` / `memory_forget` / `memory_update`
++
++**memory-recall 定位：** 成为 MLP 的替代品，工具名兼容 MLP，用户切换 `slots.memory` 即可无缝替换。
++
++---
++
++## 改造分为两个维度
++
++| 维度 | 内容 | 优先级 |
++|------|------|--------|
++| 维度一 | 软件工程修改：修正错误的接口/注册方式 | P0 |
++| 维度二 | 功能改进：L1/L2/L3 逻辑、payload、存储抽象等 | P1 |
++
++---
++
++## 维度一：软件工程修改
++
++### 1.1 现状问题
++
++| 文件 | 问题描述 | 影响 |
++|------|----------|------|
++| `src/index.ts` | Hook 用错事件（`before_agent_start` 而非 `before_prompt_build`） | Hook 不触发 |
++| `src/index.ts` | auto-inject 方向错误：走 Hook 而非 Tool | 与 OpenClaw memory slot 机制不兼容 |
++| `src/index.ts` | recall 是简化版实现 | 没有调用 Python L1/L2/L3 cascade |
++| `src/core/matcher.py` | 有完整 cascade 但未被 TS 调用 | Python 能力浪费 |
++| `src/openclaw/interceptor.py` | Python 侧 Hook interceptor | 未被使用，可删除 |
++
++### 1.2 正确接入方式（参考 MLP）
++
++**MLP 验证过的模式：**
++
++1. 声明 `kind: "memory"` — 让插件可以被 slot 选中
++2. 注册 stub `registerMemoryRuntime()` — 让 `openclaw doctor` 检查通过
++3. 所有功能通过 **Tool** 提供 — agent 主动调用
++4. 不依赖 Hook auto-inject — slot 切换时 tool 行为自动跟随
++
++**关键代码模式（MLP index.ts:2167-2191）：**
++
++```typescript
++// Stub Memory Runtime（让 doctor 检查通过）
++if (typeof api.registerMemoryRuntime === "function") {
++  api.registerMemoryRuntime({
++    async getMemorySearchManager(_params) {
++      return {
++        manager: {
++          status: () => ({
++            backend: "builtin" as const,
++            provider: "memory-recall",
++            embeddingAvailable: embedHealth.ok,
++            retrievalAvailable: retrievalHealth,
++          }),
++          probeEmbeddingAvailability: async () => ({ ...embedHealth }),
++          probeVectorAvailability: async () => retrievalHealth,
++        },
++      };
++    },
++    resolveMemoryBackendConfig() {
++      return { backend: "builtin" as const };
++    },
++  });
++}
++```
++
++**不需要实现完整的 `MemoryPluginCapability` 接口**，只需要一个 stub 满足检查即可。
++
++### 1.3 目标架构
++
++```
++┌─────────────────────────────────────────────────────────────────┐
++│                      OpenClaw Gateway                             │
++├─────────────────────────────────────────────────────────────────┤
++│  index.ts (TypeScript Plugin)                                    │
++│  ├─ registerMemoryRuntime() → stub                              │
++│  ├─ registerTool(memory_recall)                                 │
++│  ├─ registerTool(memory_store)                                  │
++│  ├─ registerTool(memory_forget)                                 │
++│  └─ registerTool(memory_update)                                 │
++│       │                                                         │
++│       │ fetch() HTTP                                           │
++│       ▼                                                         │
++│  Python HTTP Service (src/server.py)                            │
++│  ├─ GET /recall?query=...&limit=...                            │
++│  ├─ POST /store {content, metadata}                            │
++│  ├─ GET /ready                                                 │
++│  └─ (future) /forget /update                                   │
++│       │                                                         │
++│       ▼                                                         │
++│  src/core/matcher.py (L1/L2/L3 Cascade)                       │
++│  ├─ L1: embedding 向量检索                                     │
++│  ├─ L2: BM25 关键词检索                                        │
++│  └─ L3: Graph 关联扩展                                          │
++│       │                                                         │
++│       ▼                                                         │
++│  Storage Backend (Qdrant / LanceDB)                            │
++└─────────────────────────────────────────────────────────────────┘
++```
++
++### 1.4 Step 1：Python HTTP Service
++
++**新建文件：** `src/server.py`
++
++**依赖：** `aiohttp`
++
++**端口：** 从 config 读取，默认 `18732`
++
++**端点清单：**
++
++| 端点 | 方法 | 参数 | 返回 |
++|------|------|------|------|
++| `/ready` | GET | - | `{"status": "ok"}` |
++| `/recall` | GET | `query`, `limit` | 召回结果列表 |
++| `/store` | POST | `content`, `metadata` | `{id, status}` |
++| `/forget` | POST | `query` 或 `memory_id` | `{deleted, count}` |
++| `/update` | POST | `memory_id`, `content` | `{id, status}` |
++
++**实现要点：**
++
++```python
++# src/server.py
++from aiohttp import web
++from .matcher import MemoryMatcher
++
++matcher = MemoryMatcher(config)
++
++async def recall_handler(request):
++    query = request.query.get("query", "")
++    limit = int(request.query.get("limit", 10))
++    results = await matcher.recall(query, max_results=limit)
++    return web.json_response({"results": results})
++
++async def store_handler(request):
++    body = await request.json()
++    memory_id = await matcher.store(body["content"], body.get("metadata", {}))
++    return web.json_response({"id": memory_id, "status": "ok"})
++
++app = web.Application()
++app.router.add_get("/ready", lambda _: web.json_response({"status": "ok"}))
++app.router.add_get("/recall", recall_handler)
++app.router.add_post("/store", store_handler)
++```
++
++**生命周期管理：** 通过 `registerService()` 在 TS 侧管理进程启动/停止。
++
++### 1.5 Step 2：重写 TypeScript 插件
++
++**修改文件：** `src/index.ts`（完全重写）
++
++**删除内容：**
++- `before_agent_start` Hook 及 auto-inject 逻辑
++- `message_received` / `agent_end` Hook
++- 简化版 `recallMemories()` 函数
++
++**新增内容：**
++
++```typescript
++// 1. registerMemoryRuntime stub（让 doctor 通过）
++api.registerMemoryRuntime({
++  async getMemorySearchManager(_params) {
++    return { manager: { status: () => ({ backend: "builtin", provider: "memory-recall" }) } }
++  },
++  resolveMemoryBackendConfig() { return { backend: "builtin" } },
++})
++
++// 2. registerService（管理 Python HTTP service）
++api.registerService({
++  id: "memory-recall-service",
++  start: async () => {
++    const child = spawn("python", ["-m", "memory_recall.server"], {
++      stdio: ["pipe", "pipe", "inherit"]
++    })
++    await waitForUrl(`${SERVICE_URL}/ready`)
++    return child
++  },
++  stop: async (child) => { child.kill() }
++})
++
++// 3. registerTool（4 个核心工具）
++api.registerTool(createRecallTool(), { name: "memory_recall" })
++api.registerTool(createStoreTool(), { name: "memory_store" })
++api.registerTool(createForgetTool(), { name: "memory_forget" })
++api.registerTool(createUpdateTool(), { name: "memory_update" })
++```
++
++### 1.6 Step 3：工具定义详细设计
++
++#### memory_recall
++
++```typescript
++name: "memory_recall"
++description: `Search through long-term memories using hybrid retrieval.
++Use when:
++- User asks about something you discussed before
++- User mentions a preference, decision, or fact you should know
++- You are unsure about a previous conversation context
++- User asks what you remember about X
++Do NOT use for general reasoning, current tasks, or facts you should know.`
++parameters:
++  query: string (required) — "Search query to find relevant memories"
++  limit: number (optional, default=5, max=20) — "Max results to return"
++  scope: string (optional) — "Specific memory scope to search in"
++  category: enum (optional) — preference|fact|decision|entity|reflection|other
++execute:
++  1. fetch GET /recall?query=...&limit=...
++  2. parse results
++  3. format output with relevance scores
++  4. track access (patch last_accessed_at)
++return format:
++  Found N memories:
++  1. [preference] content... (relevance: 85%)
++  2. [decision] content... (relevance: 72%)
++```
++
++#### memory_store
++
++```typescript
++name: "memory_store"
++description: `Save important information to long-term memory.
++Use when:
++- User explicitly asks you to remember something
++- User corrects you about a preference or fact
++- You discover something important about the user or project
++- User says "记得..." or "记住..."
++Format: clear, concise statements of what to remember.`
++parameters:
++  text: string (required) — "Information to remember"
++  importance: number (optional, default=0.7, range=0-1) — "Importance score"
++  category: enum (optional, default=other) — preference|fact|decision|entity|reflection|other
++  scope: string (optional) — "Memory scope, defaults to agent scope"
++execute:
++  1. fetch POST /store {content, metadata}
++  2. LLM extraction runs server-side (extract 6W + category if not provided)
++  3. store to Qdrant with vector
++  4. return confirmation
++return format:
++  Stored: "content preview..." in scope 'global'
++```
++
++#### memory_forget
++
++```typescript
++name: "memory_forget"
++description: `Delete specific memories.
++Use when:
++- User asks to forget or delete something
++- User corrects a wrong memory
++- User says "忘掉..." or "删除..."
++Requires either query (search first) or memoryId (direct delete).`
++parameters:
++  query: string (optional) — "Search query to find memory to delete"
++  memoryId: string (optional) — "Specific memory ID to delete"
++  scope: string (optional) — "Scope to search/delete from"
++execute:
++  if memoryId:
++    DELETE by id
++  if query:
++    recall first, then delete by ID
++    if single result with score > 0.9: auto-delete
++    else: return candidates list
++return format:
++  Memory {id} forgotten. OR
++  Found N candidates. Specify memoryId to delete:
++  1. [id] content...
++```
++
++#### memory_update
++
++```typescript
++name: "memory_update"
++description: `Update an existing memory's content.
++Use when:
++- User asks to update or change something in memory
++- A stored fact has changed and needs correction
++- User says "更新记忆..." or "修改..."`
++parameters:
++  memoryId: string (required) — "Memory ID to update"
++  text: string (required) — "New content"
++  importance: number (optional) — "Updated importance score"
++  category: enum (optional) — preference|fact|decision|entity|reflection|other
++execute:
++  1. fetch POST /update {memory_id, content, metadata}
++  2. re-compute embedding
++  3. update in Qdrant
++return format:
++  Updated memory {id}: "new content preview..."
++```
++
++### 1.7 Step 4：configSchema 更新
++
++```typescript
++// openclaw.plugin.json configSchema 调整
++{
++  "qdrant": {
++    "type": "object",
++    "properties": {
++      "host": { "type": "string", "default": "localhost" },
++      "port": { "type": "integer", "default": 6333 },
++      "collection": { "type": "string", "default": "memory_recall" }
++    }
++  },
++  "embedding": {
++    "type": "object",
++    "properties": {
++      "baseURL": { "type": "string", "default": "http://localhost:11434" },
++      "model": { "type": "string", "default": "bge-m3" },
++      "dimensions": { "type": "integer", "default": 1024 }
++    }
++  },
++  "pythonService": {
++    "type": "object",
++    "properties": {
++      "port": { "type": "integer", "default": 18732 },
++      "host": { "type": "string", "default": "localhost" },
++      "timeoutMs": { "type": "integer", "default": 10000 }
++    }
++  },
++  "storage": {
++    "type": "object",
++    "properties": {
++      "backend": { "type": "string", "enum": ["qdrant", "lancedb"], "default": "qdrant" }
++    }
++  },
++  "enableTools": {
++    "type": "object",
++    "properties": {
++      "store": { "type": "boolean", "default": true },
++      "forget": { "type": "boolean", "default": true },
++      "update": { "type": "boolean", "default": true }
++    }
++  },
++  "l1": { "type": "object", "properties": { "enabled": { "type": "boolean", "default": true } } },
++  "l2": { "type": "object", "properties": { "enabled": { "type": "boolean", "default": true }, "minScore": { "type": "number", "default": 0.3 } } },
++  "l3": { "type": "object", "properties": { "enabled": { "type": "boolean", "default": true }, "triggerThreshold": { "type": "number", "default": 0.6 } } }
++}
++```
++
++### 1.8 文件改动清单
++
++| 操作 | 文件 | 说明 |
++|------|------|------|
++| 新建 | `src/server.py` | Python HTTP 服务入口 |
++| 新建 | `src/storage/interface.py` | 统一存储接口 |
++| 新建 | `src/storage/qdrant_impl.py` | Qdrant 实现 |
++| 新建 | `src/storage/lancedb_impl.py` | LanceDB 实现（待实现） |
++| 新建 | `src/extractor/llm_extractor.py` | LLM 提取 6W + category |
++| 重写 | `src/index.ts` | 完全重写，正确的注册方式 |
++| 修改 | `openclaw.plugin.json` | 更新 configSchema |
++| 删除 | `src/openclaw/interceptor.py` | 不再需要 |
++
++---
++
++## 维度二：功能改进
++
++### 2a. L1/L2/L3 Cascade 调整
++
++**当前设计（错误）：**
++```
++L1: keyword → L2: vector → L3: graph
++```
++
++**调整后（正确）：**
++```
++L1: vector embedding → L2: BM25 keyword → L3: graph
++```
++
++**理由：**
++- 向量检索先快速召回语义相关结果（语义相似度高但词不匹配也能召回）
++- BM25 在候选集上做精细关键词匹配
++- Graph 在 L2 结果置信度低时触发，扩展关联节点
++
++**详细流程：**
++
++```
++输入: query string
++  │
++  ├─ L1: embedding(vector)
++  │     用 Ollama bge-m3 生成 query 向量
++  │     Qdrant cosine similarity 搜索 top-K
++  │     输出: candidate_ids + vector_scores
++  │
++  ├─ L2: BM25 keyword
++  │     jieba 分词 (中文) / nltk word_tokenize (英文)
++  │     计算 query 对每个 candidate 的 BM25 得分
++  │     合并 L1 + L2 得分: score = α*L1_score + β*L2_score
++  │     α=0.6, β=0.4（可配置）
++  │     过滤: minScore < 0.3 → 丢弃
++  │     输出: ranked candidates + combined_scores
++  │
++  └─ L3: graph expansion (条件触发)
++        触发条件: top-1 score < triggerThreshold (默认 0.6)
++        使用记忆节点 graph（6W + category 关系）
++        扩展: 相关联的节点加入候选
++        重排序后输出
++```
++
++**代码位置：** `src/core/matcher.py` 需要大改，从零实现正确的 cascade。
++
++### 2b. Graph Payload 结构
++
++**设计原则：**
++- Graph nodes/edges 存储在 Qdrant payload 中（不单独建图库）
++- 使用 6W + MLP 6-category 作为节点属性
++- Graph 关系通过 payload 中的 `graph_edges` 字段表达
++
++**MLP 6 Category：**
++
++| category | 说明 | 示例 |
++|----------|------|------|
++| `preference` | 用户偏好 | "用户喜欢用 zsh" |
++| `fact` | 事实性陈述 | "服务器在东京" |
++| `decision` | 决策结论 | "我们决定用 PostgreSQL" |
++| `entity` | 实体 | "张三是项目经理" |
++| `reflection` | 反思总结 | "发现这个方案有性能问题" |
++| `other` | 其他 | - |
++
++**MR 6W：**
++
++| 字段 | 说明 | 来源 |
++|------|------|------|
++| `who` | 谁相关 | LLM 提取 |
++| `what` | 做了什么/是什么 | LLM 提取 |
++| `when` | 时间 | LLM 提取或 auto |
++| `where` | 地点 | LLM 提取 |
++| `why` | 原因/动机 | LLM 提取 |
++| `how` | 方式/方法 | LLM 提取 |
++
++**Qdrant Point Payload 结构：**
++
++```json
++{
++  "content": "用户偏好使用 zsh 因为它的自动补全功能更强",
++  "category": "preference",
++  "6w": {
++    "who": "用户",
++    "what": "偏好使用 zsh",
++    "when": "unknown",
++    "where": "terminal",
++    "why": "自动补全功能更强",
++    "how": "配置 .zshrc"
++  },
++  "agent_id": "main",
++  "scope": "global",
++  "importance": 0.8,
++  "stored_at": "2026-04-24T10:00:00Z",
++  "graph_edges": [
++    {"source": "uuid_current", "target": "uuid_related", "relation": "caused_by", "relation_type": "preference→decision"}
++  ],
++  "graph_tags": ["shell", "terminal", "configuration"],
++  "state": "confirmed",
++  "access_count": 0,
++  "last_accessed_at": null,
++  "invalidated_at": null,
++  "superseded_by": null
++}
++```
++
++### 2c. LLM 提取 6W + Category
++
++**触发时机：** `memory_store` 时自动调用
++
++**LLM 调用方式：** 通过 `api.runtime.subagent.run()` 调起 OpenClaw 内置 subagent
++
++**具体流程：**
++
++```
++TypeScript: memory_store tool execute()
++  → HTTP POST /store {content, metadata}
++    → Python: store_handler()
++      → LLM extraction:
++        subagent.run({
++          prompt: EXTRACTION_PROMPT,
++          disableTools: true,
++          timeoutMs: 5000
++        })
++      → 得到 {category, 6w}
++      → 存入 Qdrant
++```
++
++**Extraction Prompt：**
++
++```
++You are a memory structuring assistant. Extract structured information from the given text.
++
++Input: "${text}"
++
++Output a valid JSON object with this exact structure:
++{
++  "category": "preference|fact|decision|entity|reflection|other",
++  "6w": {
++    "who": "extracted who is involved, or 'unknown'",
++    "what": "extracted what happened or what is the statement, or 'unknown'",
++    "when": "extracted time/date if mentioned, or 'unknown'",
++    "where": "extracted location if mentioned, or 'unknown'",
++    "why": "extracted reason/motivation if mentioned, or 'unknown'",
++    "how": "extracted method/manner if mentioned, or 'unknown'"
++  }
++}
++
++Rules:
++- category must be exactly one of: preference, fact, decision, entity, reflection, other
++- 6w fields must be concise (max 50 chars each)
++- If information is not available, use "unknown"
++- Return ONLY the JSON object, no explanation
++```
++
++**Fallback：** 如果 LLM extraction 失败，使用 `category=other`，6w 全为 `unknown`。
++
++**实现位置：** `src/extractor/llm_extractor.py`
++
++### 2d. 存储抽象层
++
++**背景：** 当前硬编码 Qdrant，需要支持切换到 LanceDB。
++
++**统一接口设计：**
++
++```python
++# src/storage/interface.py
++from abc import ABC, abstractmethod
++
++class StorageBackend(ABC):
++    @abstractmethod
++    async def init(self, config: dict) -> None:
++        """Initialize collection/schema"""
++        pass
++
++    @abstractmethod
++    async def store(self, point: dict) -> str:
++        """Store a memory point, return id"""
++        pass
++
++    @abstractmethod
++    async def search_vector(self, query_vector: list[float], limit: int, score_threshold: float | None) -> list[dict]:
++        """Vector similarity search"""
++        pass
++
++    @abstractmethod
++    async def search_bm25(self, query: str, limit: int) -> list[dict]:
++        """BM25 keyword search"""
++        pass
++
++    @abstractmethod
++    async def get(self, memory_id: str) -> dict | None:
++        """Get by id"""
++        pass
++
++    @abstractmethod
++    async def update(self, memory_id: str, data: dict) -> bool:
++        """Update a memory"""
++        pass
++
++    @abstractmethod
++    async def delete(self, memory_id: str) -> bool:
++        """Delete by id"""
++        pass
++
++    @abstractmethod
++    async def scroll(self, limit: int, offset: str | None) -> tuple[list[dict], str | None]:
++        """Paginate all memories"""
++        pass
++```
++
++**工厂模式：**
++
++```python
++# src/storage/factory.py
++from .qdrant_impl import QdrantStorage
++from .lancedb_impl import LanceDBStorage
++
++def create_storage(backend: str, config: dict) -> StorageBackend:
++    if backend == "qdrant":
++        return QdrantStorage(config)
++    elif backend == "lancedb":
++        return LanceDBStorage(config)
++    else:
++        raise ValueError(f"Unknown storage backend: {backend}")
++```
++
++**配置文件：**
++
++```json5
++{
++  "storage": {
++    "backend": "qdrant",  // "qdrant" | "lancedb"
++    "qdrant": {
++      "host": "localhost",
++      "port": 6333,
++      "collection": "memory_recall"
++    },
++    "lancedb": {
++      "path": "~/.openclaw/memory-recall.lancedb",
++      "table": "memories"
++    }
++  }
++}
++```
++
++### 2e. Graph 更新机制
++
++**触发时机：** OpenClaw `before_compaction` / `after_compaction` Hook
++
++**目的：** 定期更新记忆之间的关联关系（6W + category）
++
++**流程：**
++
++```
++OpenClaw compaction 运行
++  → index.ts: before_compaction Hook 触发
++    → 调用 Python /graph-update 端点
++      → 读取近期 N 条记忆（scroll Qdrant）
++      → 调用 graphify 构建关系：
++        graphify.analyze(memories)
++        → 提取实体、关系、因果链
++      → 更新 Qdrant 中的 graph_edges 字段
++```
++
++**触发策略：**
++
++| 策略 | 条件 | 说明 |
++|------|------|------|
++| 增量 | 每次 compaction | 只处理上次之后新增的记忆 |
++| 全量 | 每 10 次 compaction | 重建完整图谱 |
++
++**graphify 集成：** 使用 `~/vault/graphify/` 的能力，参考其 SKILL.md。
++
++**关键代码：**
++
++```typescript
++// index.ts
++api.on("before_compaction", async (event) => {
++  const resp = await fetch(`${SERVICE_URL}/graph-update`, {
++    method: "POST",
++    body: JSON.stringify({ mode: "incremental" })
++  })
++  const result = await resp.json()
++  api.logger.info?.(`Graph updated: ${result.updated} nodes`)
++})
++```
++
++### 2f. Agent 隔离
++
++**方案：** 使用 `agent_id` 字段隔离，参考 MLP。
++
++**Scope 层级：**
++
++| scope | 说明 | 示例 |
++|-------|------|------|
++| `global` | 所有 agent 共享 | 系统配置、通用知识 |
++| `agent:{id}` | 指定 agent 私有 | `agent:main` |
++| `session:{id}` | 指定 session 私有 | `session:2026-04-24-xxx` |
++
++**存储时的隔离：**
++
++```json
++{
++  "content": "...",
++  "agent_id": "main",    // 必填
++  "scope": "global"      // 默认 global
++}
++```
++
++**召回时的过滤：**
++
++```python
++def get_accessible_scopes(agent_id: str) -> list[str]:
++    return [
++        "global",
++        f"agent:{agent_id}",
++        # session scope 需要从上下文获取
++    ]
++
++# 查询时加 filter
++filter_by_agent_scopes(get_accessible_scopes(agent_id))
++```
++
++### 2g. 遗忘机制
++
++**待讨论。**
++
++可能的方案：
++1. **软删除**：标记 `invalidated_at` 时间戳，不物理删除
++2. **硬删除**：直接从 Qdrant 删除 point
++3. **层级遗忘**：按时间衰减自动降低 importance
++
++---
++
++## 工具 vs Hook 的职责划分
++
++| 功能 | 实现方式 | Hook/端点 | 说明 |
++|------|----------|-----------|------|
++| recall | Tool | GET /recall | agent 主动调用，核心功能 |
++| store | Tool | POST /store | agent 主动存档，含 LLM 提取 |
++| forget | Tool | POST /forget | agent 纠错 |
++| update | Tool | POST /update | agent 修正 |
++| graph 更新 | Hook | `before_compaction` | 触发 graphify 更新图谱 |
++| slot 集成 | Stub | `registerMemoryRuntime()` | 让 doctor 通过检查 |
++| auto-inject | ~~Hook~~ | ~~before_prompt_build~~ | 暂不实现，tool 方式更可控 |
++
++---
++
++## 风险与注意事项
++
++| 风险 | 影响 | 缓解方案 |
++|------|------|----------|
++| Python service 启动失败 | gateway 启动不了 | `registerService()` 有超时保护，失败不影响 gateway |
++| LLM extraction 超时 | store 变慢 | 5s timeout，失败走 fallback |
++| Graph 更新计算量大 | compaction 变慢 | 增量更新策略，只处理新增节点 |
++| Qdrant 挂了 | recall/store 全挂 | 返回有意义的错误，LLM 降级回复 |
++| 切换 LanceDB | 数据迁移 | 暂不实现，V2 再加 |
++
++---
++
++## 开发顺序
++
++```
++Phase 1: 软件工程修复
++  1.1 新建 src/server.py（Python HTTP）
++  1.2 重写 src/index.ts（正确的注册方式 + 4 个 tool）
++  1.3 更新 openclaw.plugin.json
++
++Phase 2: 核心功能
++  2.1 调整 L1/L2/L3 cascade（调整 src/core/matcher.py）
++  2.2 实现 BM25 L2
++  2.3 实现存储抽象层（Qdrant + LanceDB 接口）
++
++Phase 3: 高级功能
++  3.1 LLM 提取 6W + category（src/extractor/）
++  3.2 Graph 更新机制（before_compaction Hook + graphify）
++  3.3 Agent 隔离完善
++
++Phase 4: 完善
++  4.1 CLI 命令（stats/list/compact）
++  4.2 forget 机制细化
++  4.3 文档和测试
++```
++
++---
++
++## 依赖项
++
++| 依赖 | 用途 | 安装 |
++|------|------|------|
++| `aiohttp` | Python HTTP 服务 | `pip install aiohttp` |
++| `qdrant-client` | Qdrant Python SDK | `pip install qdrant-client` |
++| `jieba` | 中文分词 | `pip install jieba` |
++| `nltk` | 英文分词 | `pip install nltk` |
++| rank_bm25 | BM25 算法 | `pip install rank-bm25` |
++| `openclaw/plugin-sdk` | TS 插件 SDK | `npm install openclaw` |
++
++---
++
++## 参考资料
++
++- MLP 源码：`~/sources/memory-lancedb-pro/index.ts`
++- OpenClaw Plugin Hook 系统：`~/vault/OPENCLAW_PLUGIN_HOOK_SYSTEM.md`
++- graphify skill：`~/vault/graphify/SKILL.md`
++- OpenClaw memory slot：`plugins.slots.memory`
+diff --git a/TRANSFORMATION_PLAN.md:Zone.Identifier b/TRANSFORMATION_PLAN.md:Zone.Identifier
+new file mode 100644
+index 0000000..d6c1ec6
+Binary files /dev/null and b/TRANSFORMATION_PLAN.md:Zone.Identifier differ
+diff --git a/package-lock.json b/package-lock.json
+index 3652d5f..4329458 100644
+--- a/package-lock.json
++++ b/package-lock.json
+@@ -1,12 +1,12 @@
+ {
+   "name": "memory-recall",
+-  "version": "0.1.0",
++  "version": "0.2.0",
+   "lockfileVersion": 3,
+   "requires": true,
+   "packages": {
+     "": {
+       "name": "memory-recall",
+-      "version": "0.1.0",
++      "version": "0.2.0",
+       "dependencies": {
+         "@sinclair/typebox": "^0.34.49"
+       }
+diff --git a/src/core/graph_store.py b/src/core/graph_store.py
+index 28f82fd..dc4c132 100644
+--- a/src/core/graph_store.py
++++ b/src/core/graph_store.py
+@@ -161,11 +161,10 @@ class GraphStore:
+ 
+         if GRAPHIFY_AVAILABLE and self._graph is not None:
+             try:
+-                scored: dict[str, float] = {}
++                bfs_scores: dict[str, float] = {}
+                 for seed in seed_ids:
+                     if seed not in self._graph:
+                         continue
+-                    bfs_scores: dict[str, float] = {}
+                     frontier = {seed}
+                     visited = {seed}
+                     for d in range(depth):
+diff --git a/src/core/llm_extractor.py b/src/core/llm_extractor.py
+index 1afedfe..c224c7f 100644
+--- a/src/core/llm_extractor.py
++++ b/src/core/llm_extractor.py
+@@ -9,16 +9,29 @@ import httpx
+ 
+ log = logging.getLogger("llm-extractor")
+ 
+-CATEGORIES = ["preference", "fact", "decision", "entity", "reflection", "other"]
++CATEGORIES = ["profile", "preferences", "entities", "events", "cases", "patterns", "other"]
+ 
+ SYSTEM_PROMPT = (
+     "你是一个记忆提取助手。从用户输入中提取结构化信息。\n\n"
+     "输出格式（JSON）：\n"
+-    '{ "category": "preference|fact|decision|entity|reflection|other",\n'
++    '{\n'
++    '  "category": "profile|preferences|entities|events|cases|patterns|other",\n'
+     '  "6w": { "who": "人物/角色", "what": "核心事件/内容", "when": "时间", "where": "地点", "why": "原因", "how": "方式" },\n'
+-    '  "importance": 0.0-1.0 }\n\n'
+-    "规则：\n"
+-    "- category: preference=用户偏好, fact=客观事实, decision=决定计划, entity=实体, reflection=反思, other=其他\n"
++    '  "importance": 0.0-1.0\n'
++    '}\n\n'
++    "分类规则：\n"
++    "- profile: 用户身份、背景、职业、关系、位置等静态信息\n"
++    "  例：'我是程序员'、'我在北京工作'、'我有三个孩子'\n"
++    "- preferences: 喜好、倾向、习惯、口味等偏好\n"
++    "  例：'我喜欢川菜'、'我不喝咖啡'、'习惯早起'\n"
++    "- entities: 提到的人名/公司名/产品名/事件名等具体实体\n"
++    "  例：'张总说'、'用GPT-4'、'下周开会'\n"
++    "- events: 发生的事、事实陈述、时间线事件\n"
++    "  例：'上周感冒了'、'项目上线了'、'天气变冷'\n"
++    "- cases: 决定、问题、解决方案、挑战、选项分析\n"
++    "  例：'决定去北京'、'我选了方案A'、'遇到bug'\n"
++    "- patterns: 重复行为、模式、规律、洞察\n"
++    "  例：'每次加班都点外卖'、'总在周末购物'\n"
+     "- importance: 0.3以下=闲聊, 0.3-0.6=普通, 0.6-0.8=重要, 0.8-1.0=关键\n"
+     "- 没有对应信息则留空"
+ )
+@@ -51,6 +64,7 @@ class LLMExtractor:
+                     "model": self.model,
+                     "prompt": prompt,
+                     "stream": False,
++                    "think": False,
+                     "options": {"temperature": 0.1},
+                 },
+                 timeout=60.0,
+@@ -112,27 +126,44 @@ class LLMExtractor:
+         return "other"
+ 
+     def _fallback_extract(self, content: str) -> dict:
+-        import re
+-
+         words = content.lower()
+-        why_indicators = ["因为", "为了", "原因", "so that", "because", "reason"]
+-        how_indicators = ["通过", "使用", "用", "using", "by", "via", "方法"]
+-        decision_indicators = ["决定", "决定要", "要", "决定", "will", "plan", "going to"]
+-        pref_indicators = ["喜欢", "不喜欢", "prefer", "hate", "love", "want", "不想要"]
++        pref_indicators = ["喜欢", "不喜欢", "prefer", "hate", "love", "want", "不想要", "倾向"]
++        decision_indicators = ["决定", "决定要", "will", "plan", "going to", "选了", "选择"]
++        entity_indicators = ["张总", "王", "李", "公司", "GPT", "产品", "项目", "会议"]
++        event_indicators = ["发生", "上周", "昨天", "今天", "上线", "完成", "结束"]
++        pattern_indicators = ["每次", "总是", "经常", "通常", "往往", "规律"]
++        profile_indicators = ["我是", "我在", "我有", "职业", "工作", "住在"]
+ 
+         category = "other"
+-        for kw in decision_indicators:
++        for kw in pref_indicators:
+             if kw in words:
+-                category = "decision"
++                category = "preferences"
+                 break
+         if category == "other":
+-            for kw in pref_indicators:
++            for kw in decision_indicators:
++                if kw in words:
++                    category = "cases"
++                    break
++        if category == "other":
++            for kw in entity_indicators:
++                if kw in words:
++                    category = "entities"
++                    break
++        if category == "other":
++            for kw in event_indicators:
++                if kw in words:
++                    category = "events"
++                    break
++        if category == "other":
++            for kw in pattern_indicators:
+                 if kw in words:
+-                    category = "preference"
++                    category = "patterns"
+                     break
+         if category == "other":
+-            if re.search(r"^\[?\d{4}[-/]\d{2}", content):
+-                category = "fact"
++            for kw in profile_indicators:
++                if kw in words:
++                    category = "profile"
++                    break
+ 
+         importance = 0.3
+         if any(kw in words for kw in ["重要", "关键", "必须", "critical", "important", "must"]):
+diff --git a/src/core/qdrant_store.py b/src/core/qdrant_store.py
+index c2261be..d93c911 100644
+--- a/src/core/qdrant_store.py
++++ b/src/core/qdrant_store.py
+@@ -71,6 +71,18 @@ class QdrantStore:
+             log.warning(f"Qdrant init failed (non-fatal): {e}")
+             self._initialized = True
+ 
++    def build_enhanced_text(self, content: str, six_w: dict) -> str:
++        parts = [f"原文: {content}"]
++        six_w_labels = {
++            "who": "人物", "what": "事件", "when": "时间",
++            "where": "地点", "why": "原因", "how": "方式"
++        }
++        for key, label in six_w_labels.items():
++            val = six_w.get(key, "")
++            if val:
++                parts.append(f"{label}: {val}")
++        return " | ".join(parts)
++
+     async def embed(self, text: str) -> list[float]:
+         try:
+             client = await self._get_client()
+@@ -88,6 +100,10 @@ class QdrantStore:
+             log.error(f"Embedding failed: {e}")
+             return []
+ 
++    async def embed_enhanced(self, content: str, six_w: dict) -> list[float]:
++        text = self.build_enhanced_text(content, six_w)
++        return await self.embed(text)
++
+     async def upsert(self, memory_id: str, vector: list[float], payload: dict) -> str:
+         client = await self._get_client()
+         point = {
+diff --git a/src/index.ts b/src/index.ts
+index a11638d..48c405a 100644
+--- a/src/index.ts
++++ b/src/index.ts
+@@ -1,5 +1,5 @@
+ /**
+- * Memory Recall - OpenClaw Plugin (Phase 1)
++ * Memory Recall - OpenClaw Plugin (Phase 2)
+  * Architecture: TS plugin → Python server → Qdrant/BM25/Graphify
+  */
+ import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
+@@ -13,9 +13,6 @@ interface MemoryRecallConfig {
+   autoRecall?: boolean;
+   autoRecallMaxItems?: number;
+   autoRecallMaxChars?: number;
+-  l1?: { enabled?: boolean; minScore?: number };
+-  l2?: { enabled?: boolean; minScore?: number };
+-  l3?: { enabled?: boolean; triggerThreshold?: number };
+ }
+ 
+ function parsePluginConfig(value: unknown): MemoryRecallConfig {
+@@ -23,7 +20,7 @@ function parsePluginConfig(value: unknown): MemoryRecallConfig {
+   return value as MemoryRecallConfig;
+ }
+ 
+-async function serverRequest<T>(path: string, body: unknown): Promise<T> {
++async function serverPost<T>(path: string, body: unknown): Promise<T> {
+   const url = `${SERVER_BASE}${path}`;
+   const resp = await fetch(url, {
+     method: "POST",
+@@ -37,13 +34,6 @@ async function serverRequest<T>(path: string, body: unknown): Promise<T> {
+   return resp.json() as Promise<T>;
+ }
+ 
+-async function serverGet<T>(path: string): Promise<T> {
+-  const url = `${SERVER_BASE}${path}`;
+-  const resp = await fetch(url);
+-  if (!resp.ok) throw new Error(`Server GET ${path} failed: ${resp.status}`);
+-  return resp.json() as Promise<T>;
+-}
+-
+ function extractText(content: unknown): string | null {
+   if (typeof content === "string") return content.trim();
+   if (Array.isArray(content)) {
+@@ -67,22 +57,18 @@ function extractText(content: unknown): string | null {
+   return null;
+ }
+ 
+-async function registerMemoryRuntime(_api: OpenClawPluginApi): Promise<void> {}
+-
+ const memoryRecallPlugin = {
+   id: "memory-recall",
+   name: "Memory Recall",
+   description:
+-    "L1/L2/L3 cascade memory recall: vector + BM25 (jieba) + graph expansion (graphify). Requires memory-recall-server (Python) running on port 8765.",
++    "L1/L2/L3 cascade memory recall with async extraction. Stores user/assistant messages and injects relevant memories before LLM response.",
+   kind: "memory" as const,
+ 
+   async register(api: OpenClawPluginApi) {
+     const config = parsePluginConfig(api.pluginConfig);
+     const serverUrl = config.serverUrl ?? SERVER_BASE;
+ 
+-    api.logger.info?.(`[memory-recall] register called, server=${serverUrl}`);
+-
+-    await registerMemoryRuntime(api);
++    api.logger.info(`[memory-recall] register, server=${serverUrl}`);
+ 
+     api.registerTool(
+       {
+@@ -90,7 +76,6 @@ const memoryRecallPlugin = {
+         label: "Recall Memories",
+         description:
+           "Search past memories using hybrid vector + BM25 + graph cascade. " +
+-          "Returns relevant memories ranked by relevance score. " +
+           "Use when user asks about previous conversations, past decisions, or things you remember.",
+         parameters: Type.Object({
+           query: Type.String({ description: "Natural language search query" }),
+@@ -102,7 +87,7 @@ const memoryRecallPlugin = {
+         }),
+         async execute(_toolCallId: string, params: { query: string; max_results?: number; agent_id?: string; min_score?: number }) {
+           try {
+-            const data = await serverRequest<{
++            const data = await serverPost<{
+               results: Array<{
+                 id: string;
+                 content: string;
+@@ -112,7 +97,7 @@ const memoryRecallPlugin = {
+               }>;
+               count: number;
+               layers: { l1: number; l2: number; l3: number };
+-            }>("/recall", {
++            }>(`${serverUrl}/recall`, {
+               query: params.query,
+               max_results: params.max_results ?? 5,
+               agent_id: params.agent_id,
+@@ -139,7 +124,7 @@ const memoryRecallPlugin = {
+               details: { count: data.count, layers: data.layers },
+             };
+           } catch (err) {
+-            api.logger.error?.(`[memory-recall] recall error: ${String(err)}`);
++            api.logger.error(`[memory-recall] recall error: ${String(err)}`);
+             return {
+               content: [{ type: "text", text: `Memory recall failed: ${String(err)}` }],
+               details: { error: String(err) },
+@@ -156,7 +141,7 @@ const memoryRecallPlugin = {
+         label: "Store Memory",
+         description:
+           "Store a piece of information in long-term memory. " +
+-          "Automatically extracts 6W (who/what/when/where/why/how), category, and importance via LLM.",
++          "Automatically extracts 6W (who/what/when/where/why/how), MLP category (profile/preferences/entities/events/cases/patterns), and importance via LLM.",
+         parameters: Type.Object({
+           content: Type.String({ description: "The memory content to store" }),
+           agent_id: Type.Optional(Type.String({ description: "Agent identifier" })),
+@@ -165,12 +150,11 @@ const memoryRecallPlugin = {
+         }),
+         async execute(_toolCallId: string, params: { content: string; agent_id?: string; conversation_id?: string; metadata?: Record<string, unknown> }) {
+           try {
+-            const data = await serverRequest<{
++            const data = await serverPost<{
+               memory_id: string;
+               conversation_id: string;
+-              category: string;
+-              importance: number;
+-            }>("/store", {
++              pending: boolean;
++            }>(`${serverUrl}/store`, {
+               content: params.content,
+               agent_id: params.agent_id,
+               conversation_id: params.conversation_id,
+@@ -180,13 +164,13 @@ const memoryRecallPlugin = {
+               content: [
+                 {
+                   type: "text",
+-                  text: `Memory stored successfully.\nID: ${data.memory_id}\nCategory: ${data.category}\nImportance: ${(data.importance * 100).toFixed(0)}%`,
++                  text: `Memory stored.\nID: ${data.memory_id}\nPending extraction: ${data.pending}`,
+                 },
+               ],
+               details: data,
+             };
+           } catch (err) {
+-            api.logger.error?.(`[memory-recall] store error: ${String(err)}`);
++            api.logger.error(`[memory-recall] store error: ${String(err)}`);
+             return {
+               content: [{ type: "text", text: `Failed to store memory: ${String(err)}` }],
+               details: { error: String(err) },
+@@ -207,13 +191,13 @@ const memoryRecallPlugin = {
+         }),
+         async execute(_toolCallId: string, params: { memory_id: string }) {
+           try {
+-            await serverRequest("/forget", { memory_id: params.memory_id });
++            await serverPost(`${serverUrl}/forget`, { memory_id: params.memory_id });
+             return {
+               content: [{ type: "text", text: `Memory ${params.memory_id} deleted.` }],
+               details: { memory_id: params.memory_id, deleted: true },
+             };
+           } catch (err) {
+-            api.logger.error?.(`[memory-recall] forget error: ${String(err)}`);
++            api.logger.error(`[memory-recall] forget error: ${String(err)}`);
+             return {
+               content: [{ type: "text", text: `Failed to delete memory: ${String(err)}` }],
+               details: { error: String(err) },
+@@ -236,7 +220,7 @@ const memoryRecallPlugin = {
+         }),
+         async execute(_toolCallId: string, params: { memory_id: string; content?: string; metadata?: Record<string, unknown> }) {
+           try {
+-            await serverRequest("/update", {
++            await serverPost(`${serverUrl}/update`, {
+               memory_id: params.memory_id,
+               content: params.content,
+               metadata: params.metadata,
+@@ -246,7 +230,7 @@ const memoryRecallPlugin = {
+               details: { memory_id: params.memory_id, updated: true },
+             };
+           } catch (err) {
+-            api.logger.error?.(`[memory-recall] update error: ${String(err)}`);
++            api.logger.error(`[memory-recall] update error: ${String(err)}`);
+             return {
+               content: [{ type: "text", text: `Failed to update memory: ${String(err)}` }],
+               details: { error: String(err) },
+@@ -261,58 +245,64 @@ const memoryRecallPlugin = {
+     const autoRecall = config.autoRecall !== false;
+ 
+     if (autoStore) {
+-      api.on("message_received", async (event, ctx) => {
++      api.registerHook("message_received", async (event) => {
+         const text = extractText(event.content);
+         if (!text || text.length < 10) return;
+         try {
+-          await serverRequest("/store", {
++          await serverPost(`${serverUrl}/store`, {
+             content: text,
+             agent_id: event.from,
+-            conversation_id: ctx.conversationId,
++            conversation_id: event.conversationId,
+             metadata: {
+               role: "user",
+               sender: event.from,
+-              channel_id: ctx.channelId,
++              channel_id: event.channelId,
+             },
+           });
+-          api.logger.debug?.(`[memory-recall] auto-stored user message`);
++          api.logger.debug(`[memory-recall] auto-stored user message`);
+         } catch (err) {
+-          api.logger.warn?.(`[memory-recall] auto-store failed: ${String(err)}`);
++          api.logger.warn(`[memory-recall] auto-store failed: ${String(err)}`);
+         }
+       });
+ 
+-      api.on("agent_end", async (event) => {
+-        try {
+-          const messages = event.messages as Array<{ role?: string; content?: unknown }>;
+-          for (const msg of messages) {
+-            if (msg.role === "assistant") {
+-              const text = extractText(msg.content);
+-              if (text && text.length > 10) {
+-                await serverRequest("/store", {
++      api.registerHook("agent_end", async (event) => {
++        const messages = event.messages as Array<{ role?: string; content?: unknown }>;
++        for (const msg of messages) {
++          if (msg.role === "assistant") {
++            const text = extractText(msg.content);
++            if (text && text.length > 10) {
++              try {
++                await serverPost(`${serverUrl}/store`, {
+                   content: text,
+                   metadata: { role: "assistant" },
+                 });
++              } catch (err) {
++                api.logger.warn(`[memory-recall] agent_end store failed: ${String(err)}`);
+               }
+             }
+           }
+-        } catch (err) {
+-          api.logger.warn?.(`[memory-recall] agent_end store failed: ${String(err)}`);
+         }
+       });
+     }
+ 
+     if (autoRecall) {
+-      api.on("before_prompt_build", async (event) => {
+-        const prompt = event.prompt;
+-        if (!prompt || prompt.length < 5) return;
++      api.registerHook("before_prompt_build", async (event) => {
++        const prompt = (event as { prompt?: string }).prompt;
++        if (!prompt || prompt.length < 3) return;
++
+         try {
+-          const data = await serverRequest<{
+-            results: Array<{ content: string; relevance_score: number }>;
++          const data = await serverPost<{
++            results: Array<{
++              content: string;
++              category: string;
++              relevance_score: number;
++            }>;
+             count: number;
+-          }>("/recall", {
++          }>(`${serverUrl}/recall`, {
+             query: prompt,
+             max_results: config.autoRecallMaxItems ?? 3,
+           });
++
+           if (!data.results.length) return;
+ 
+           const maxChars = config.autoRecallMaxChars ?? 600;
+@@ -320,23 +310,26 @@ const memoryRecallPlugin = {
+           let totalChars = 0;
+           for (const r of data.results) {
+             if (totalChars + r.content.length > maxChars) break;
+-            selected.push(`[${((r.relevance_score ?? 0) * 100).toFixed(0)}%] ${r.content}`);
+-            totalChars += r.content.length;
++            const cat = r.category || "memory";
++            const score = ((r.relevance_score ?? 0) * 100).toFixed(0);
++            selected.push(`[${cat}][${score}%] ${r.content}`);
++            totalChars += r.content.length + 30;
+           }
+ 
+           if (!selected.length) return;
+ 
+-          api.logger.info?.(`[memory-recall] auto-recall injecting ${selected.length} memories`);
++          api.logger.info(`[memory-recall] injecting ${selected.length} memories (${totalChars} chars)`);
++
+           return {
+             prependContext: `<relevant-memories>\n${selected.join("\n")}\n</relevant-memories>`,
+           };
+         } catch (err) {
+-          api.logger.warn?.(`[memory-recall] auto-recall failed: ${String(err)}`);
++          api.logger.warn(`[memory-recall] auto-recall failed: ${String(err)}`);
+         }
+       });
+     }
+ 
+-    api.logger.info?.("[memory-recall] all hooks and tools registered");
++    api.logger.info("[memory-recall] all hooks and tools registered");
+   },
+ };
+ 
+diff --git a/src/server.py b/src/server.py
+index 7d96f99..92a4439 100644
+--- a/src/server.py
++++ b/src/server.py
+@@ -11,6 +11,7 @@ import uuid
+ from pathlib import Path
+ from typing import Any
+ 
++import httpx
+ import uvicorn
+ from fastapi import FastAPI, HTTPException
+ from fastapi.middleware.cors import CORSMiddleware
+@@ -40,7 +41,7 @@ DEFAULT_EMBEDDING_URL = os.getenv("EMBEDDING_URL", "http://localhost:11434/api/e
+ DEFAULT_EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "bge-m3")
+ DEFAULT_EMBEDDING_DIM = int(os.getenv("EMBEDDING_DIM", "1024"))
+ DEFAULT_OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434/api/generate")
+-DEFAULT_LLM_MODEL = os.getenv("LLM_MODEL", "qwen3.5:4b")
++DEFAULT_LLM_MODEL = os.getenv("LLM_MODEL", "qwen3.5:9b")
+ DEFAULT_LLM_WARMUP_INTERVAL = int(os.getenv("LLM_WARMUP_INTERVAL", "0"))
+ 
+ app = FastAPI(title="Memory Recall Server")
+@@ -85,9 +86,9 @@ llm_extractor: Any = None
+ 
+ async def _warmup_llm(url: str, model: str) -> None:
+     try:
+-        async with httpx.AsyncClient(timeout=10.0) as client:
+-            resp = await client.post(url, json={"model": model, "prompt": "."})
+-            log.info(f"[warmup] {model} loaded: {resp.status_code == 200}")
++        async with httpx.AsyncClient(timeout=60.0) as client:
++            resp = await client.post(url, json={"model": model, "prompt": ".", "think": False})
++            log.info(f"[warmup] {model} ready: {resp.status_code == 200}")
+     except Exception as e:
+         log.warning(f"[warmup] failed to warmup {model}: {e}")
+ 
+@@ -114,8 +115,6 @@ async def get_services():
+         graph_store = GraphStore(graph_file=str(GRAPH_FILE))
+         llm_extractor = LLMExtractor(ollama_url=DEFAULT_OLLAMA_URL, model=DEFAULT_LLM_MODEL)
+ 
+-        await _warmup_llm(DEFAULT_OLLAMA_URL, DEFAULT_LLM_MODEL)
+-
+     return qdrant_store, bm25_index, graph_store, llm_extractor
+ 
+ 
+@@ -200,61 +199,102 @@ async def recall(req: RecallRequest):
+ 
+ @app.post("/store")
+ async def store(req: StoreRequest):
+-    """Store a memory: vector + BM25 index + graph + LLM extraction"""
+-    store, bm25, graph, extractor = await get_services()
++    """Store a memory immediately (no LLM extraction in critical path)."""
++    store_obj, bm25, graph, extractor = await get_services()
+ 
+     memory_id = str(uuid.uuid4())
+     conversation_id = req.conversation_id or str(uuid.uuid4())
+     agent_id = req.agent_id or "default"
++    stored_at = __import__("datetime").datetime.now().isoformat()
+ 
+     log.info(f"[/store] id={memory_id} content='{req.content[:50]}...'")
+ 
+-    vector = await store.embed(req.content)
+-    if not vector:
+-        raise HTTPException(status_code=503, detail="Embedding service unavailable")
+-
+-    extraction = {}
+     try:
+-        extraction = await extractor.extract(req.content)
+-        log.info(f"[/store] LLM extraction: category={extraction.get('category')} 6w keys={[k for k in extraction.get('6w', {}).keys() if extraction['6w'][k]]}")
++        vector = await store_obj.embed(req.content)
+     except Exception as e:
+-        log.warning(f"[/store] LLM extraction failed (non-fatal): {e}")
+-        extraction = {"category": "other", "6w": {}}
++        raise HTTPException(status_code=503, detail=f"Embedding failed: {e}")
+ 
+-    payload = {
++    if not vector:
++        raise HTTPException(status_code=503, detail="Embedding returned empty vector")
++
++    immediate_payload = {
+         "content": req.content,
+         "agent_id": agent_id,
+         "conversation_id": conversation_id,
+-        "category": extraction.get("category", "other"),
+-        "6w": extraction.get("6w", {}),
+-        "importance": extraction.get("importance", 0.5),
+-        "stored_at": __import__("datetime").datetime.now().isoformat(),
++        "category": "other",
++        "6w": {},
++        "importance": 0.5,
++        "stored_at": stored_at,
+         "state": "confirmed",
+         "access_count": 0,
+-        "last_accessed": __import__("datetime").datetime.now().isoformat(),
++        "last_accessed": stored_at,
+         "graph_edges": [],
++        "extraction_done": False,
+         **(req.metadata or {}),
+     }
+ 
+-    stored_id = await store.upsert(memory_id, vector, payload)
++    await store_obj.upsert(memory_id, vector, immediate_payload)
+     bm25.add(memory_id, req.content)
+ 
+-    graph.add_node(memory_id, payload)
++    graph.add_node(memory_id, immediate_payload)
+     if req.metadata and req.metadata.get("conversation_id"):
+         graph.add_session_edge(memory_id, conversation_id)
+ 
+-    l1_results_for_graph = await store.vector_search(req.content, limit=5)
+-    graph.build_recall_edges(memory_id, [r["id"] for r in l1_results_for_graph if r.get("id")])
++    l1_results = await store_obj.vector_search(req.content, limit=5)
++    graph.build_recall_edges(memory_id, [r["id"] for r in l1_results if r.get("id")])
++
++    asyncio.create_task(
++        _async_extraction_and_update(
++            memory_id, req.content, extractor, store_obj,
++            agent_id, conversation_id, stored_at, req.metadata
++        )
++    )
++    log.info(f"[/store] bg extraction scheduled for {memory_id}")
+ 
+     return {
+-        "memory_id": stored_id,
++        "memory_id": memory_id,
+         "conversation_id": conversation_id,
+-        "category": payload["category"],
+-        "6w": payload["6w"],
+-        "importance": payload["importance"],
++        "pending": True,
+     }
+ 
+ 
++async def _async_extraction_and_update(
++    memory_id: str,
++    content: str,
++    extractor,
++    store_obj,
++    agent_id: str,
++    conversation_id: str,
++    stored_at: str,
++    metadata: dict | None,
++):
++    """Background: extract 6w/category and update payload."""
++    try:
++        extraction = await extractor.extract(content)
++        log.info(f"[bg] extraction done for {memory_id}: {extraction.get('category')}")
++        updated_payload = {
++            "content": content,
++            "agent_id": agent_id,
++            "conversation_id": conversation_id,
++            "category": extraction.get("category", "other"),
++            "6w": extraction.get("6w", {}),
++            "importance": extraction.get("importance", 0.5),
++            "stored_at": stored_at,
++            "state": "confirmed",
++            "access_count": 0,
++            "last_accessed": __import__("datetime").datetime.now().isoformat(),
++            "graph_edges": [],
++            "extraction_done": True,
++            **(metadata or {}),
++        }
++        six_w = extraction.get("6w", {})
++        vector = await store_obj.embed_enhanced(content, six_w)
++        if vector:
++            await store_obj.upsert(memory_id, vector, updated_payload)
++    except Exception as e:
++        log.warning(f"[bg] extraction failed for {memory_id}: {e}")
++
++
+ @app.post("/forget")
+ async def forget(req: ForgetRequest):
+     """Delete a memory from Qdrant, BM25 index, and graph"""
+@@ -309,4 +349,11 @@ if __name__ == "__main__":
+     log.info(f"  Qdrant: {DEFAULT_QDRANT_HOST}:{DEFAULT_QDRANT_PORT}/{DEFAULT_COLLECTION}")
+     log.info(f"  Embedding: {DEFAULT_EMBEDDING_URL} ({DEFAULT_EMBEDDING_MODEL})")
+     log.info(f"  Ollama: {DEFAULT_OLLAMA_URL}")
+-    uvicorn.run(app, host="0.0.0.0", port=8765, log_level="info")
++    config = uvicorn.Config(app, host="0.0.0.0", port=8765, log_level="info", lifespan="on")
++    server = uvicorn.Server(config)
++
++    async def _run_with_warmup():
++        asyncio.create_task(_warmup_llm(DEFAULT_OLLAMA_URL, DEFAULT_LLM_MODEL))
++        await server.serve()
++
++    asyncio.run(_run_with_warmup())

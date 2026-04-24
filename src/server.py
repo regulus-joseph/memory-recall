@@ -249,6 +249,7 @@ async def store(req: StoreRequest):
             agent_id, conversation_id, stored_at, req.metadata
         )
     )
+    log.info(f"[/store] bg extraction scheduled for {memory_id}")
 
     return {
         "memory_id": memory_id,
@@ -351,8 +352,4 @@ if __name__ == "__main__":
     config = uvicorn.Config(app, host="0.0.0.0", port=8765, log_level="info", lifespan="on")
     server = uvicorn.Server(config)
 
-    async def _run_with_warmup():
-        asyncio.create_task(_warmup_llm(DEFAULT_OLLAMA_URL, DEFAULT_LLM_MODEL))
-        await server.serve()
-
-    asyncio.run(_run_with_warmup())
+    asyncio.run(server.serve())

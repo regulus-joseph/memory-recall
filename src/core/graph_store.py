@@ -161,11 +161,10 @@ class GraphStore:
 
         if GRAPHIFY_AVAILABLE and self._graph is not None:
             try:
-                scored: dict[str, float] = {}
+                bfs_scores: dict[str, float] = {}
                 for seed in seed_ids:
                     if seed not in self._graph:
                         continue
-                    bfs_scores: dict[str, float] = {}
                     frontier = {seed}
                     visited = {seed}
                     for d in range(depth):
