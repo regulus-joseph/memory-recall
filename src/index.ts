@@ -1,5 +1,5 @@
 /**
- * Memory Recall - OpenClaw Plugin (Phase 1)
+ * Memory Recall - OpenClaw Plugin (Phase 2)
  * Architecture: TS plugin → Python server → Qdrant/BM25/Graphify
  */
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
@@ -13,9 +13,6 @@ interface MemoryRecallConfig {
   autoRecall?: boolean;
   autoRecallMaxItems?: number;
   autoRecallMaxChars?: number;
-  l1?: { enabled?: boolean; minScore?: number };
-  l2?: { enabled?: boolean; minScore?: number };
-  l3?: { enabled?: boolean; triggerThreshold?: number };
 }
 
 function parsePluginConfig(value: unknown): MemoryRecallConfig {
@@ -23,7 +20,7 @@ function parsePluginConfig(value: unknown): MemoryRecallConfig {
   return value as MemoryRecallConfig;
 }
 
-async function serverRequest<T>(path: string, body: unknown): Promise<T> {
+async function serverPost<T>(path: string, body: unknown): Promise<T> {
   const url = `${SERVER_BASE}${path}`;
   const resp = await fetch(url, {
     method: "POST",
@@ -34,13 +31,6 @@ async function serverRequest<T>(path: string, body: unknown): Promise<T> {
     const text = await resp.text().catch(() => "");
     throw new Error(`Server error ${resp.status}: ${text}`);
   }
-  return resp.json() as Promise<T>;
-}
-
-async function serverGet<T>(path: string): Promise<T> {
-  const url = `${SERVER_BASE}${path}`;
-  const resp = await fetch(url);
-  if (!resp.ok) throw new Error(`Server GET ${path} failed: ${resp.status}`);
   return resp.json() as Promise<T>;
 }
 
@@ -67,22 +57,18 @@ function extractText(content: unknown): string | null {
   return null;
 }
 
-async function registerMemoryRuntime(_api: OpenClawPluginApi): Promise<void> {}
-
 const memoryRecallPlugin = {
   id: "memory-recall",
   name: "Memory Recall",
   description:
-    "L1/L2/L3 cascade memory recall: vector + BM25 (jieba) + graph expansion (graphify). Requires memory-recall-server (Python) running on port 8765.",
+    "L1/L2/L3 cascade memory recall with async extraction. Stores user/assistant messages and injects relevant memories before LLM response.",
   kind: "memory" as const,
 
   async register(api: OpenClawPluginApi) {
     const config = parsePluginConfig(api.pluginConfig);
     const serverUrl = config.serverUrl ?? SERVER_BASE;
 
-    api.logger.info?.(`[memory-recall] register called, server=${serverUrl}`);
-
-    await registerMemoryRuntime(api);
+    api.logger.info(`[memory-recall] register, server=${serverUrl}`);
 
     api.registerTool(
       {
@@ -90,7 +76,6 @@ const memoryRecallPlugin = {
         label: "Recall Memories",
         description:
           "Search past memories using hybrid vector + BM25 + graph cascade. " +
-          "Returns relevant memories ranked by relevance score. " +
           "Use when user asks about previous conversations, past decisions, or things you remember.",
         parameters: Type.Object({
           query: Type.String({ description: "Natural language search query" }),
@@ -102,7 +87,7 @@ const memoryRecallPlugin = {
         }),
         async execute(_toolCallId: string, params: { query: string; max_results?: number; agent_id?: string; min_score?: number }) {
           try {
-            const data = await serverRequest<{
+            const data = await serverPost<{
               results: Array<{
                 id: string;
                 content: string;
@@ -112,7 +97,7 @@ const memoryRecallPlugin = {
               }>;
               count: number;
               layers: { l1: number; l2: number; l3: number };
-            }>("/recall", {
+            }>(`${serverUrl}/recall`, {
               query: params.query,
               max_results: params.max_results ?? 5,
               agent_id: params.agent_id,
@@ -139,7 +124,7 @@ const memoryRecallPlugin = {
               details: { count: data.count, layers: data.layers },
             };
           } catch (err) {
-            api.logger.error?.(`[memory-recall] recall error: ${String(err)}`);
+            api.logger.error(`[memory-recall] recall error: ${String(err)}`);
             return {
               content: [{ type: "text", text: `Memory recall failed: ${String(err)}` }],
               details: { error: String(err) },
@@ -156,7 +141,7 @@ const memoryRecallPlugin = {
         label: "Store Memory",
         description:
           "Store a piece of information in long-term memory. " +
-          "Automatically extracts 6W (who/what/when/where/why/how), category, and importance via LLM.",
+          "Automatically extracts 6W (who/what/when/where/why/how), MLP category (profile/preferences/entities/events/cases/patterns), and importance via LLM.",
         parameters: Type.Object({
           content: Type.String({ description: "The memory content to store" }),
           agent_id: Type.Optional(Type.String({ description: "Agent identifier" })),
@@ -165,12 +150,11 @@ const memoryRecallPlugin = {
         }),
         async execute(_toolCallId: string, params: { content: string; agent_id?: string; conversation_id?: string; metadata?: Record<string, unknown> }) {
           try {
-            const data = await serverRequest<{
+            const data = await serverPost<{
               memory_id: string;
               conversation_id: string;
-              category: string;
-              importance: number;
-            }>("/store", {
+              pending: boolean;
+            }>(`${serverUrl}/store`, {
               content: params.content,
               agent_id: params.agent_id,
               conversation_id: params.conversation_id,
@@ -180,13 +164,13 @@ const memoryRecallPlugin = {
               content: [
                 {
                   type: "text",
-                  text: `Memory stored successfully.\nID: ${data.memory_id}\nCategory: ${data.category}\nImportance: ${(data.importance * 100).toFixed(0)}%`,
+                  text: `Memory stored.\nID: ${data.memory_id}\nPending extraction: ${data.pending}`,
                 },
               ],
               details: data,
             };
           } catch (err) {
-            api.logger.error?.(`[memory-recall] store error: ${String(err)}`);
+            api.logger.error(`[memory-recall] store error: ${String(err)}`);
             return {
               content: [{ type: "text", text: `Failed to store memory: ${String(err)}` }],
               details: { error: String(err) },
@@ -207,13 +191,13 @@ const memoryRecallPlugin = {
         }),
         async execute(_toolCallId: string, params: { memory_id: string }) {
           try {
-            await serverRequest("/forget", { memory_id: params.memory_id });
+            await serverPost(`${serverUrl}/forget`, { memory_id: params.memory_id });
             return {
               content: [{ type: "text", text: `Memory ${params.memory_id} deleted.` }],
               details: { memory_id: params.memory_id, deleted: true },
             };
           } catch (err) {
-            api.logger.error?.(`[memory-recall] forget error: ${String(err)}`);
+            api.logger.error(`[memory-recall] forget error: ${String(err)}`);
             return {
               content: [{ type: "text", text: `Failed to delete memory: ${String(err)}` }],
               details: { error: String(err) },
@@ -236,7 +220,7 @@ const memoryRecallPlugin = {
         }),
         async execute(_toolCallId: string, params: { memory_id: string; content?: string; metadata?: Record<string, unknown> }) {
           try {
-            await serverRequest("/update", {
+            await serverPost(`${serverUrl}/update`, {
               memory_id: params.memory_id,
               content: params.content,
               metadata: params.metadata,
@@ -246,7 +230,7 @@ const memoryRecallPlugin = {
               details: { memory_id: params.memory_id, updated: true },
             };
           } catch (err) {
-            api.logger.error?.(`[memory-recall] update error: ${String(err)}`);
+            api.logger.error(`[memory-recall] update error: ${String(err)}`);
             return {
               content: [{ type: "text", text: `Failed to update memory: ${String(err)}` }],
               details: { error: String(err) },
@@ -261,58 +245,64 @@ const memoryRecallPlugin = {
     const autoRecall = config.autoRecall !== false;
 
     if (autoStore) {
-      api.on("message_received", async (event, ctx) => {
+      api.registerHook("message_received", async (event) => {
         const text = extractText(event.content);
         if (!text || text.length < 10) return;
         try {
-          await serverRequest("/store", {
+          await serverPost(`${serverUrl}/store`, {
             content: text,
             agent_id: event.from,
-            conversation_id: ctx.conversationId,
+            conversation_id: event.conversationId,
             metadata: {
               role: "user",
               sender: event.from,
-              channel_id: ctx.channelId,
+              channel_id: event.channelId,
             },
           });
-          api.logger.debug?.(`[memory-recall] auto-stored user message`);
+          api.logger.debug(`[memory-recall] auto-stored user message`);
         } catch (err) {
-          api.logger.warn?.(`[memory-recall] auto-store failed: ${String(err)}`);
+          api.logger.warn(`[memory-recall] auto-store failed: ${String(err)}`);
         }
       });
 
-      api.on("agent_end", async (event) => {
-        try {
-          const messages = event.messages as Array<{ role?: string; content?: unknown }>;
-          for (const msg of messages) {
-            if (msg.role === "assistant") {
-              const text = extractText(msg.content);
-              if (text && text.length > 10) {
-                await serverRequest("/store", {
+      api.registerHook("agent_end", async (event) => {
+        const messages = event.messages as Array<{ role?: string; content?: unknown }>;
+        for (const msg of messages) {
+          if (msg.role === "assistant") {
+            const text = extractText(msg.content);
+            if (text && text.length > 10) {
+              try {
+                await serverPost(`${serverUrl}/store`, {
                   content: text,
                   metadata: { role: "assistant" },
                 });
+              } catch (err) {
+                api.logger.warn(`[memory-recall] agent_end store failed: ${String(err)}`);
               }
             }
           }
-        } catch (err) {
-          api.logger.warn?.(`[memory-recall] agent_end store failed: ${String(err)}`);
         }
       });
     }
 
     if (autoRecall) {
-      api.on("before_prompt_build", async (event) => {
-        const prompt = event.prompt;
-        if (!prompt || prompt.length < 5) return;
+      api.registerHook("before_prompt_build", async (event) => {
+        const prompt = (event as { prompt?: string }).prompt;
+        if (!prompt || prompt.length < 3) return;
+
         try {
-          const data = await serverRequest<{
-            results: Array<{ content: string; relevance_score: number }>;
+          const data = await serverPost<{
+            results: Array<{
+              content: string;
+              category: string;
+              relevance_score: number;
+            }>;
             count: number;
-          }>("/recall", {
+          }>(`${serverUrl}/recall`, {
             query: prompt,
             max_results: config.autoRecallMaxItems ?? 3,
           });
+
           if (!data.results.length) return;
 
           const maxChars = config.autoRecallMaxChars ?? 600;
@@ -320,23 +310,26 @@ const memoryRecallPlugin = {
           let totalChars = 0;
           for (const r of data.results) {
             if (totalChars + r.content.length > maxChars) break;
-            selected.push(`[${((r.relevance_score ?? 0) * 100).toFixed(0)}%] ${r.content}`);
-            totalChars += r.content.length;
+            const cat = r.category || "memory";
+            const score = ((r.relevance_score ?? 0) * 100).toFixed(0);
+            selected.push(`[${cat}][${score}%] ${r.content}`);
+            totalChars += r.content.length + 30;
           }
 
           if (!selected.length) return;
 
-          api.logger.info?.(`[memory-recall] auto-recall injecting ${selected.length} memories`);
+          api.logger.info(`[memory-recall] injecting ${selected.length} memories (${totalChars} chars)`);
+
           return {
             prependContext: `<relevant-memories>\n${selected.join("\n")}\n</relevant-memories>`,
           };
         } catch (err) {
-          api.logger.warn?.(`[memory-recall] auto-recall failed: ${String(err)}`);
+          api.logger.warn(`[memory-recall] auto-recall failed: ${String(err)}`);
         }
       });
     }
 
-    api.logger.info?.("[memory-recall] all hooks and tools registered");
+    api.logger.info("[memory-recall] all hooks and tools registered");
   },
 };
 
