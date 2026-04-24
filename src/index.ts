@@ -20,9 +20,10 @@ function parsePluginConfig(value: unknown): MemoryRecallConfig {
   return value as MemoryRecallConfig;
 }
 
+const BASE_URL = SERVER_BASE.endsWith("/") ? SERVER_BASE.slice(0, -1) : SERVER_BASE;
+
 async function serverPost<T>(path: string, body: unknown): Promise<T> {
-  const url = `${SERVER_BASE}${path}`;
-  const resp = await fetch(url, {
+  const resp = await fetch(path, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
@@ -66,13 +67,39 @@ const memoryRecallPlugin = {
 
   register(api: OpenClawPluginApi) {
     const config = parsePluginConfig(api.pluginConfig);
-    const serverUrl = config.serverUrl ?? SERVER_BASE;
+    const baseUrl = (config.serverUrl ?? BASE_URL).replace(/\/$/, "");
 
-    api.logger.info(`[memory-recall] register, server=${serverUrl}`);
+    api.logger.info(`[memory-recall] register, server=${baseUrl}`);
+
+    try {
+      const runtimeObj = {
+        getMemorySearchManager: async () => ({
+          manager: {
+            status: () => ({
+              backend: "builtin" as const,
+              provider: "memory-recall",
+              embeddingAvailable: true,
+              retrievalAvailable: true,
+            }),
+            probeEmbeddingAvailability: async () => ({ ok: true }),
+            probeVectorAvailability: async () => true,
+          },
+        }),
+        resolveMemoryBackendConfig: () => ({ backend: "builtin" as const }),
+      };
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const regCap = (api as any).registerMemoryCapability;
+      if (typeof regCap === "function") {
+        regCap("memory-recall", { runtime: runtimeObj });
+        api.logger.info("[memory-recall] memory capability registered");
+      }
+    } catch (err) {
+      api.logger.warn(`[memory-recall] memory capability skipped: ${String(err)}`);
+    }
 
     api.registerTool(
       {
-        name: "recall_memories",
+        name: "memory_recall",
         label: "Recall Memories",
         description:
           "Search past memories using hybrid vector + BM25 + graph cascade. " +
@@ -97,7 +124,7 @@ const memoryRecallPlugin = {
               }>;
               count: number;
               layers: { l1: number; l2: number; l3: number };
-            }>(`${serverUrl}/recall`, {
+            }>(`${baseUrl}/recall`, {
               query: params.query,
               max_results: params.max_results ?? 5,
               agent_id: params.agent_id,
@@ -132,12 +159,12 @@ const memoryRecallPlugin = {
           }
         },
       },
-      { name: "recall_memories" }
+      { name: "memory_recall" }
     );
 
     api.registerTool(
       {
-        name: "store_memory",
+        name: "memory_store",
         label: "Store Memory",
         description:
           "Store a piece of information in long-term memory. " +
@@ -149,12 +176,15 @@ const memoryRecallPlugin = {
           metadata: Type.Optional(Type.Record(Type.String(), Type.Any())),
         }),
         async execute(_toolCallId: string, params: { content: string; agent_id?: string; conversation_id?: string; metadata?: Record<string, unknown> }) {
+          api.logger.info(`[memory-recall] store_memory execute, content=${params.content}`);
           try {
+            const url = `${baseUrl}/store`;
+            api.logger.info(`[memory-recall] posting to ${url}`);
             const data = await serverPost<{
               memory_id: string;
               conversation_id: string;
               pending: boolean;
-            }>(`${serverUrl}/store`, {
+            }>(`${baseUrl}/store`, {
               content: params.content,
               agent_id: params.agent_id,
               conversation_id: params.conversation_id,
@@ -178,12 +208,12 @@ const memoryRecallPlugin = {
           }
         },
       },
-      { name: "store_memory" }
+      { name: "memory_store" }
     );
 
     api.registerTool(
       {
-        name: "forget_memory",
+        name: "memory_forget",
         label: "Forget Memory",
         description: "Delete a specific memory by its ID.",
         parameters: Type.Object({
@@ -191,7 +221,7 @@ const memoryRecallPlugin = {
         }),
         async execute(_toolCallId: string, params: { memory_id: string }) {
           try {
-            await serverPost(`${serverUrl}/forget`, { memory_id: params.memory_id });
+            await serverPost(`${baseUrl}/forget`, { memory_id: params.memory_id });
             return {
               content: [{ type: "text", text: `Memory ${params.memory_id} deleted.` }],
               details: { memory_id: params.memory_id, deleted: true },
@@ -205,12 +235,12 @@ const memoryRecallPlugin = {
           }
         },
       },
-      { name: "forget_memory" }
+      { name: "memory_forget" }
     );
 
     api.registerTool(
       {
-        name: "update_memory",
+        name: "memory_update",
         label: "Update Memory",
         description: "Update content or metadata of an existing memory.",
         parameters: Type.Object({
@@ -220,7 +250,7 @@ const memoryRecallPlugin = {
         }),
         async execute(_toolCallId: string, params: { memory_id: string; content?: string; metadata?: Record<string, unknown> }) {
           try {
-            await serverPost(`${serverUrl}/update`, {
+            await serverPost(`${baseUrl}/update`, {
               memory_id: params.memory_id,
               content: params.content,
               metadata: params.metadata,
@@ -238,7 +268,7 @@ const memoryRecallPlugin = {
           }
         },
       },
-      { name: "update_memory" }
+      { name: "memory_update" }
     );
 
     const autoStore = config.autoStore !== false;
@@ -249,7 +279,7 @@ const memoryRecallPlugin = {
         const text = extractText(event.content);
         if (!text || text.length < 10) return;
         try {
-          await serverPost(`${serverUrl}/store`, {
+          await serverPost(`${baseUrl}/store`, {
             content: text,
             agent_id: event.from,
             conversation_id: event.conversationId,
@@ -263,7 +293,7 @@ const memoryRecallPlugin = {
         } catch (err) {
           api.logger.warn(`[memory-recall] auto-store failed: ${String(err)}`);
         }
-      });
+      }, { name: "memory-recall-autostore" });
 
       api.registerHook("agent_end", async (event) => {
         const messages = event.messages as Array<{ role?: string; content?: unknown }>;
@@ -272,7 +302,7 @@ const memoryRecallPlugin = {
             const text = extractText(msg.content);
             if (text && text.length > 10) {
               try {
-                await serverPost(`${serverUrl}/store`, {
+                await serverPost(`${baseUrl}/store`, {
                   content: text,
                   metadata: { role: "assistant" },
                 });
@@ -282,7 +312,7 @@ const memoryRecallPlugin = {
             }
           }
         }
-      });
+      }, { name: "memory-recall-agent-end" });
     }
 
     if (autoRecall) {
@@ -298,7 +328,7 @@ const memoryRecallPlugin = {
               relevance_score: number;
             }>;
             count: number;
-          }>(`${serverUrl}/recall`, {
+          }>(`${baseUrl}/recall`, {
             query: prompt,
             max_results: config.autoRecallMaxItems ?? 3,
           });
@@ -326,7 +356,7 @@ const memoryRecallPlugin = {
         } catch (err) {
           api.logger.warn(`[memory-recall] auto-recall failed: ${String(err)}`);
         }
-      });
+      }, { name: "memory-recall-autorecall" });
     }
 
     api.logger.info("[memory-recall] all hooks and tools registered");

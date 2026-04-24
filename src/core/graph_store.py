@@ -93,6 +93,28 @@ class GraphStore:
             "stored_at": attrs.get("stored_at", ""),
         }
         self._build_nx_graph()
+
+    def build_category_overlap(self, memory_id: str, category: str, stored_at: str, window_hours: int = 24) -> None:
+        """Build edges to memories with same category within time window."""
+        if not category or category == "other":
+            return
+        try:
+            from datetime import datetime, timedelta
+            current = datetime.fromisoformat(stored_at)
+            window = timedelta(hours=window_hours)
+        except Exception:
+            return
+        for other_id, attrs in self.nodes.items():
+            if other_id == memory_id:
+                continue
+            if attrs.get("category") != category:
+                continue
+            try:
+                other_time = datetime.fromisoformat(attrs.get("stored_at", ""))
+                if abs((current - other_time).total_seconds()) <= window.total_seconds():
+                    self._add_edge(memory_id, other_id, "category_overlap", category)
+            except Exception:
+                continue
         self._save()
 
     def remove_node(self, memory_id: str) -> None:
@@ -141,13 +163,16 @@ class GraphStore:
             self._add_edge(memory_id, rel_id, "recall_cooccur")
         self._save()
 
-    def _add_edge(self, source: str, target: str, relation: str) -> None:
+    def _add_edge(self, source: str, target: str, relation: str, category: str | None = None) -> None:
         for edge in self.edges:
             if (edge.get("source") or edge.get("from")) == source and (
                 edge.get("target") or edge.get("to")
             ) == target:
                 return
-        self.edges.append({"source": source, "target": target, "relation": relation})
+        edge_dict = {"source": source, "target": target, "relation": relation}
+        if category:
+            edge_dict["category"] = category
+        self.edges.append(edge_dict)
         if self._graph is not None and GRAPHIFY_AVAILABLE:
             self._graph.add_edge(source, target, relation=relation)
 

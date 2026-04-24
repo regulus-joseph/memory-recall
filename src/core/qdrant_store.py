@@ -104,6 +104,22 @@ class QdrantStore:
         text = self.build_enhanced_text(content, six_w)
         return await self.embed(text)
 
+    async def check_duplicate(self, content: str, agent_id: str) -> str | None:
+        client = await self._get_client()
+        resp = await client.post(
+            f"{self.base_url}/collections/{self.collection}/points/scroll",
+            json={
+                "filter": {"must": [{"key": "agent_id", "match": {"value": agent_id}}]},
+                "with_payload": True,
+                "limit": 200,
+            },
+        )
+        resp.raise_for_status()
+        for p in resp.json().get("result", {}).get("points", []):
+            if p.get("payload", {}).get("content") == content:
+                return p["id"]
+        return None
+
     async def upsert(self, memory_id: str, vector: list[float], payload: dict) -> str:
         client = await self._get_client()
         point = {
@@ -119,7 +135,7 @@ class QdrantStore:
         return memory_id
 
     async def vector_search(
-        self, query: str, limit: int = 10, score_threshold: float = 0.0
+        self, query: str, limit: int = 10, score_threshold: float = 0.0, filter_agent_id: str | None = None
     ) -> list[dict]:
         vector = await self.embed(query)
         if not vector:
@@ -133,6 +149,10 @@ class QdrantStore:
         }
         if score_threshold > 0:
             search_body["score_threshold"] = score_threshold
+        if filter_agent_id:
+            search_body["filter"] = {
+                "must": [{"key": "agent_id", "match": {"value": filter_agent_id}}]
+            }
 
         resp = await client.post(
             f"{self.base_url}/collections/{self.collection}/points/search",

@@ -31,8 +31,13 @@ APP_DIR.mkdir(exist_ok=True)
 DATA_DIR = APP_DIR / "data"
 DATA_DIR.mkdir(exist_ok=True)
 
-BM25_INDEX_FILE = DATA_DIR / "bm25_index.json"
-GRAPH_FILE = DATA_DIR / "memory_graph.json"
+def _bm25_file(agent_id: str) -> Path:
+    safe = agent_id.replace("/", "_").replace("\\", "_")
+    return DATA_DIR / f"bm25_{safe}.json"
+
+def _graph_file(agent_id: str) -> Path:
+    safe = agent_id.replace("/", "_").replace("\\", "_")
+    return DATA_DIR / f"graph_{safe}.json"
 
 DEFAULT_QDRANT_HOST = os.getenv("QDRANT_HOST", "localhost")
 DEFAULT_QDRANT_PORT = int(os.getenv("QDRANT_PORT", "6333"))
@@ -129,10 +134,19 @@ async def stats():
     count = await store.count()
     bm25_count = bm25.doc_count()
     node_count = graph.node_count()
+    queue_file = APP_DIR / "data" / "extraction_queue.jsonl"
+    queue_length = 0
+    try:
+        if queue_file.exists():
+            with open(queue_file) as f:
+                queue_length = sum(1 for _ in f)
+    except Exception:
+        pass
     return {
         "memory_count": count,
         "bm25_doc_count": bm25_count,
         "graph_node_count": node_count,
+        "queue_length": queue_length,
     }
 
 
@@ -152,10 +166,15 @@ async def recall(req: RecallRequest):
 
     log.info(f"[/recall] query='{query[:50]}...' max={req.max_results}")
 
-    l1_results = await store.vector_search(query, limit=req.max_results * 3)
+    agent_id = req.agent_id
+    l1_results = await store.vector_search(query, limit=req.max_results * 3, filter_agent_id=agent_id)
     log.info(f"[/recall] L1 vector: {len(l1_results)} candidates")
 
-    l2_results = bm25.search(query, top_k=req.max_results * 2)
+    l2_all = bm25.search(query, top_k=req.max_results * 2)
+    if agent_id:
+        l2_results = [r for r in l2_all if r.get("agent_id") == agent_id]
+    else:
+        l2_results = l2_all
     log.info(f"[/recall] L2 BM25: {len(l2_results)} candidates")
 
     l1_map = {r["id"]: r.get("score", 0) for r in l1_results}
@@ -172,6 +191,18 @@ async def recall(req: RecallRequest):
 
     l3_expanded = graph.expand([mid for mid, _ in scored[: req.max_results * 2]], depth=2, top_k=req.max_results)
     l3_ids = set(l3_expanded.keys())
+    if agent_id and l3_ids:
+        try:
+            meta_resp = httpx.post(
+                f"http://{os.getenv('QDRANT_HOST','localhost')}:{os.getenv('QDRANT_PORT','6333')}/collections/memory_recall/points",
+                json={"ids": list(l3_ids), "with_payload": ["agent_id"]},
+                timeout=10,
+            )
+            if meta_resp.status_code == 200:
+                agent_map = {p["id"]: p["payload"].get("agent_id") for p in meta_resp.json().get("result", [])}
+                l3_ids = {mid for mid in l3_ids if agent_map.get(mid) == agent_id}
+        except Exception:
+            pass
     for mid in l3_ids:
         if mid not in l1_map and mid not in l2_map:
             scored.append((mid, l3_expanded[mid] * 0.5))
@@ -202,9 +233,15 @@ async def store(req: StoreRequest):
     """Store a memory immediately (no LLM extraction in critical path)."""
     store_obj, bm25, graph, extractor = await get_services()
 
+    agent_id = req.agent_id or "default"
+
+    dedup_id = await store_obj.check_duplicate(req.content, agent_id)
+    if dedup_id:
+        log.info(f"[/store] dedup hit: {dedup_id[:8]} content='{req.content[:30]}...'")
+        return {"memory_id": dedup_id, "conversation_id": "", "pending": False, "dedup": True}
+
     memory_id = str(uuid.uuid4())
     conversation_id = req.conversation_id or str(uuid.uuid4())
-    agent_id = req.agent_id or "default"
     stored_at = __import__("datetime").datetime.now().isoformat()
 
     log.info(f"[/store] id={memory_id} content='{req.content[:50]}...'")
@@ -217,44 +254,63 @@ async def store(req: StoreRequest):
     if not vector:
         raise HTTPException(status_code=503, detail="Embedding returned empty vector")
 
-    immediate_payload = {
+    from src.rule_extractor import extract as rule_extract
+    extraction = rule_extract(req.content)
+    category = extraction.get("category", "other")
+    six_w = extraction.get("6w", {})
+    importance = extraction.get("importance", 0.5)
+    summary = extraction.get("summary", "")
+
+    now = __import__("datetime").datetime.now().isoformat()
+    payload = {
         "content": req.content,
         "agent_id": agent_id,
         "conversation_id": conversation_id,
-        "category": "other",
-        "6w": {},
-        "importance": 0.5,
+        "category": category,
+        "6w": six_w,
+        "importance": importance,
         "stored_at": stored_at,
         "state": "confirmed",
         "access_count": 0,
-        "last_accessed": stored_at,
+        "last_accessed": now,
         "graph_edges": [],
-        "extraction_done": False,
+        "extraction_done": True,
         **(req.metadata or {}),
     }
 
-    await store_obj.upsert(memory_id, vector, immediate_payload)
-    bm25.add(memory_id, req.content)
+    await store_obj.upsert(memory_id, vector, payload)
+    bm25.add(memory_id, req.content, agent_id)
 
-    graph.add_node(memory_id, immediate_payload)
-    if req.metadata and req.metadata.get("conversation_id"):
-        graph.add_session_edge(memory_id, conversation_id)
+    graph.add_node(memory_id, payload)
+    graph.add_session_edge(memory_id, conversation_id)
+
+    if category != "other":
+        graph.build_category_overlap(memory_id, category, stored_at)
+
+    from src.lark_tok import tokenize as _lark_tokenize
+
+    words = set(_lark_tokenize(req.content))
+    added_edges: set[tuple[str, str]] = set()
+    for other_id, attrs in graph.nodes.items():
+        if other_id == memory_id:
+            continue
+        other_words = set(_lark_tokenize(attrs.get("content", "")))
+        shared = words & other_words
+        if len(shared) >= 2:
+            key = (min(memory_id, other_id), max(memory_id, other_id))
+            if key not in added_edges:
+                graph._add_edge(memory_id, other_id, "word_overlap", None)
+                added_edges.add(key)
 
     l1_results = await store_obj.vector_search(req.content, limit=5)
     graph.build_recall_edges(memory_id, [r["id"] for r in l1_results if r.get("id")])
 
-    asyncio.create_task(
-        _async_extraction_and_update(
-            memory_id, req.content, extractor, store_obj,
-            agent_id, conversation_id, stored_at, req.metadata
-        )
-    )
-    log.info(f"[/store] bg extraction scheduled for {memory_id}")
+    log.info(f"[/store] done {memory_id[:8]}: cat={category}")
 
     return {
         "memory_id": memory_id,
         "conversation_id": conversation_id,
-        "pending": True,
+        "pending": False,
     }
 
 
@@ -263,6 +319,7 @@ async def _async_extraction_and_update(
     content: str,
     extractor,
     store_obj,
+    graph,
     agent_id: str,
     conversation_id: str,
     stored_at: str,
@@ -291,6 +348,10 @@ async def _async_extraction_and_update(
         vector = await store_obj.embed_enhanced(content, six_w)
         if vector:
             await store_obj.upsert(memory_id, vector, updated_payload)
+        cat = extraction.get("category", "other")
+        if cat != "other":
+            graph.update_node(memory_id, {"content": content, "category": cat})
+        graph.build_category_overlap(memory_id, cat, stored_at)
     except Exception as e:
         log.warning(f"[bg] extraction failed for {memory_id}: {e}")
 
@@ -327,7 +388,7 @@ async def update(req: UpdateRequest):
         new_vector = await store.embed(new_content)
         if new_vector:
             await store.upsert(req.memory_id, new_vector, new_metadata)
-        bm25.update(req.memory_id, new_content)
+        bm25.update_doc(req.memory_id, new_content)
 
         try:
             extraction = await extractor.extract(new_content)

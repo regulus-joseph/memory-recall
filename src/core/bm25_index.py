@@ -1,6 +1,7 @@
 """
-BM25 Index with jieba Chinese tokenization
-File-based persistence: bm25_index.json
+BM25 Index with incremental update support.
+jieba tokenization, file-based persistence.
+增量策略：add/remove/update 不重建索引，累积 N 次或显式触发 rebuild。
 """
 import json
 import logging
@@ -8,8 +9,12 @@ import re
 from pathlib import Path
 from typing import Any
 
-JIEBA_AVAILABLE = False
 jieba = None
+try:
+    import jieba
+    JIEBA_AVAILABLE = True
+except ImportError:
+    JIEBA_AVAILABLE = False
 
 try:
     from rank_bm25 import BM25Okapi
@@ -20,14 +25,18 @@ except ImportError:
 
 log = logging.getLogger("bm25-index")
 
+REBUILD_THRESHOLD = 20
+
 
 class BM25Index:
     def __init__(self, index_file: str):
         self.index_file = Path(index_file)
-        self.corpus: dict[str, str] = {}
+        self.corpus: dict[str, dict] = {}
+        self._deleted_ids: set[str] = set()
         self._bm25: Any = None
         self._tokenized: list[list[str]] = []
         self._doc_ids: list[str] = []
+        self._changes_since_rebuild = 0
         self._load()
 
     def _load(self) -> None:
@@ -35,17 +44,27 @@ class BM25Index:
             try:
                 with open(self.index_file) as f:
                     data = json.load(f)
-                    self.corpus = data.get("corpus", {})
-                log.info(f"Loaded BM25 corpus: {len(self.corpus)} docs")
+                    raw = data.get("corpus", {})
+                    for doc_id, val in raw.items():
+                        if isinstance(val, str):
+                            self.corpus[doc_id] = {"content": val, "agent_id": "default"}
+                        else:
+                            self.corpus[doc_id] = val
+                    self._deleted_ids = set(data.get("deleted", []))
+                log.info(f"Loaded BM25 corpus: {len(self.corpus)} docs, {len(self._deleted_ids)} deleted")
             except Exception as e:
                 log.warning(f"Failed to load BM25 index: {e}")
                 self.corpus = {}
+                self._deleted_ids = set()
         self._rebuild()
 
     def _save(self) -> None:
         try:
             with open(self.index_file, "w") as f:
-                json.dump({"corpus": self.corpus}, f, ensure_ascii=False)
+                json.dump({
+                    "corpus": self.corpus,
+                    "deleted": list(self._deleted_ids),
+                }, f, ensure_ascii=False)
         except Exception as e:
             log.error(f"Failed to save BM25 index: {e}")
 
@@ -79,64 +98,86 @@ class BM25Index:
         return tokens
 
     def _rebuild(self) -> None:
-        if not BM25_AVAILABLE or not self.corpus:
-            self._bm25 = None
-            self._tokenized = []
-            self._doc_ids = []
-            return
-
-        self._doc_ids = list(self.corpus.keys())
-        self._tokenized = [self._tokenize(text) for text in self.corpus.values()]
-        if self._tokenized and self._doc_ids:
+        self._deleted_ids &= set(self.corpus.keys())
+        active_ids = [did for did in self.corpus if did not in self._deleted_ids]
+        self._doc_ids = active_ids
+        self._tokenized = [self._tokenize(self.corpus[did].get("content", "")) for did in active_ids]
+        if self._tokenized and self._doc_ids and BM25_AVAILABLE:
             try:
                 self._bm25 = BM25Okapi(self._tokenized)
-                log.info(f"Rebuilt BM25 index: {len(self._doc_ids)} docs")
+                log.info(f"BM25 rebuilt: {len(self._doc_ids)} active docs")
             except Exception as e:
                 log.error(f"BM25 rebuild failed: {e}")
                 self._bm25 = None
+        else:
+            self._bm25 = None
+            self._tokenized = []
+            self._doc_ids = []
+        self._changes_since_rebuild = 0
 
-    def add(self, doc_id: str, content: str) -> None:
-        self.corpus[doc_id] = content
-        self._rebuild()
+    def _may_rebuild(self) -> None:
+        self._changes_since_rebuild += 1
+        if self._changes_since_rebuild >= REBUILD_THRESHOLD:
+            self._rebuild()
+
+    def add(self, doc_id: str, content: str, agent_id: str = "default") -> None:
+        if doc_id in self._deleted_ids:
+            self._deleted_ids.discard(doc_id)
+        self.corpus[doc_id] = {"content": content, "agent_id": agent_id}
+        if doc_id not in self._doc_ids:
+            self._doc_ids.append(doc_id)
+            self._tokenized.append(self._tokenize(content))
+            self._rebuild()
+        else:
+            idx = self._doc_ids.index(doc_id)
+            self._tokenized[idx] = self._tokenize(content)
+            self._may_rebuild()
         self._save()
 
     def remove(self, doc_id: str) -> None:
-        self.corpus.pop(doc_id, None)
-        self._rebuild()
+        self._deleted_ids.add(doc_id)
+        self._may_rebuild()
         self._save()
 
-    def update(self, doc_id: str, content: str) -> None:
-        self.corpus[doc_id] = content
-        self._rebuild()
-        self._save()
+    def update_doc(self, doc_id: str, content: str) -> None:
+        if doc_id in self.corpus:
+            self.corpus[doc_id]["content"] = content
+            if doc_id in self._doc_ids:
+                idx = self._doc_ids.index(doc_id)
+                self._tokenized[idx] = self._tokenize(content)
+            self._may_rebuild()
+            self._save()
 
     def search(self, query: str, top_k: int = 20) -> list[dict]:
         if not self._bm25 or not self._tokenized:
             return []
-
         tokens = self._tokenize(query)
         if not tokens:
             return []
-
         try:
             scores = self._bm25.get_scores(tokens)
         except Exception as e:
             log.error(f"BM25 scoring failed: {e}")
             return []
-
-        scored: list[tuple[str, float]] = [
+        scored = [
             (self._doc_ids[i], float(scores[i])) for i in range(len(self._doc_ids))
+            if self._doc_ids[i] not in self._deleted_ids
         ]
         scored.sort(key=lambda x: x[1], reverse=True)
-
         results = []
         for doc_id, score in scored[:top_k]:
+            entry = self.corpus.get(doc_id, {})
             results.append({
                 "id": doc_id,
                 "score": round(score, 4),
-                "content": self.corpus.get(doc_id, ""),
+                "content": entry.get("content", ""),
+                "agent_id": entry.get("agent_id", "default"),
             })
         return results
 
     def doc_count(self) -> int:
-        return len(self.corpus)
+        return len(self.corpus) - len(self._deleted_ids)
+
+    def force_rebuild(self) -> None:
+        self._rebuild()
+        self._save()

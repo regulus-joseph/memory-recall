@@ -9,8 +9,16 @@
       "./src/index.ts"
     ]
   },
+  "scripts": {
+    "test": "node --test tests/all.test.mjs",
+    "test:unit": "node --test tests/all.test.mjs",
+    "test:smoke": "node smoke-test.mjs"
+  },
   "dependencies": {
     "@sinclair/typebox": "^0.34.49"
+  },
+  "devDependencies": {
+    "jiti": "^2.6.1"
   },
   "changelog": [
     {
