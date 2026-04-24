@@ -1,0 +1,80 @@
+{
+  "id": "memory-recall",
+  "name": "Memory Recall",
+  "description": "L1/L2/L3 memory recall plugin for OpenClaw agents with Qdrant vector storage",
+  "version": "0.2.0",
+  "kind": "memory",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "qdrant": {
+        "type": "object",
+        "properties": {
+          "host": { "type": "string", "default": "localhost" },
+          "port": { "type": "integer", "default": 6333 },
+          "collection": { "type": "string", "default": "memory_recall" }
+        }
+      },
+      "embedding": {
+        "type": "object",
+        "properties": {
+          "baseURL": { "type": "string", "default": "http://localhost:11434" },
+          "model": { "type": "string", "default": "bge-m3" },
+          "dimensions": { "type": "integer", "default": 1024 }
+        }
+      },
+      "autoRecall": {
+        "type": "boolean",
+        "default": true
+      },
+      "autoRecallMaxItems": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 20,
+        "default": 3
+      },
+      "autoRecallMaxChars": {
+        "type": "integer",
+        "minimum": 64,
+        "maximum": 8000,
+        "default": 600
+      },
+      "l1": {
+        "type": "object",
+        "properties": {
+          "enabled": { "type": "boolean", "default": true },
+          "minScore": { "type": "number", "default": 0.0 }
+        }
+      },
+      "l2": {
+        "type": "object",
+        "properties": {
+          "enabled": { "type": "boolean", "default": true },
+          "minScore": { "type": "number", "default": 0.3 }
+        }
+      },
+      "l3": {
+        "type": "object",
+        "properties": {
+          "enabled": { "type": "boolean", "default": true },
+          "triggerThreshold": { "type": "number", "default": 0.6 }
+        }
+      }
+    }
+  },
+  "uiHints": {
+    "autoRecall": {
+      "label": "Auto-Recall",
+      "help": "Automatically inject relevant memories before each reply"
+    },
+    "autoRecallMaxItems": {
+      "label": "Max Memory Items",
+      "help": "Maximum memories to inject per turn"
+    },
+    "autoRecallMaxChars": {
+      "label": "Max Characters",
+      "help": "Maximum total characters injected"
+    }
+  }
+}

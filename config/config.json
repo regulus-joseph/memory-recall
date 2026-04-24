@@ -1,0 +1,27 @@
+{
+  "qdrant": {
+    "host": "localhost",
+    "port": 6333,
+    "collection": "memory_recall_test"
+  },
+  "embedding": {
+    "baseURL": "http://localhost:11434",
+    "model": "bge-m3",
+    "dimensions": 1024
+  },
+  "autoRecall": true,
+  "autoRecallMaxItems": 3,
+  "autoRecallMaxChars": 600,
+  "l1": {
+    "enabled": true,
+    "minScore": 0.0
+  },
+  "l2": {
+    "enabled": true,
+    "minScore": 0.3
+  },
+  "l3": {
+    "enabled": false,
+    "triggerThreshold": 0.6
+  }
+}

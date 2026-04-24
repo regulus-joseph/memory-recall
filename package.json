@@ -1,0 +1,37 @@
+{
+  "name": "memory-recall",
+  "version": "0.2.0",
+  "type": "module",
+  "description": "L1/L2/L3 memory recall plugin for OpenClaw with Qdrant vector storage",
+  "main": "src/index.ts",
+  "openclaw": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  },
+  "dependencies": {
+    "@sinclair/typebox": "^0.34.49"
+  },
+  "changelog": [
+    {
+      "version": "0.2.0",
+      "date": "2026-04-22",
+      "changes": [
+        "添加before_agent_start hook自动注入功能",
+        "修复tools.byProvider配置使recall_memories工具对agent可见",
+        "添加TypeBox参数校验"
+      ]
+    },
+    {
+      "version": "0.1.0",
+      "date": "2026-04-22",
+      "changes": [
+        "初始版本",
+        "Qdrant向量存储",
+        "Ollama bge-m3 embedding",
+        "recall_memories工具",
+        "message_received/agent_end自动存储"
+      ]
+    }
+  ]
+}

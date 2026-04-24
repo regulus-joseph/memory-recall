@@ -1,0 +1,28 @@
+{
+  "embedding": {
+    "provider": "openai-compatible",
+    "baseURL": "http://localhost:11434",
+    "model": "bge-m3",
+    "dimensions": 1024
+  },
+  "qdrant": {
+    "host": "localhost",
+    "port": 6333,
+    "collection": "memory_recall"
+  },
+  "autoRecall": true,
+  "autoRecallMaxItems": 3,
+  "autoRecallMaxChars": 600,
+  "l1": {
+    "enabled": true,
+    "minScore": 0.3
+  },
+  "l2": {
+    "enabled": true,
+    "minScore": 0.5
+  },
+  "l3": {
+    "enabled": true,
+    "triggerThreshold": 0.6
+  }
+}
