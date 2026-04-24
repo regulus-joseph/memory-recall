@@ -1,0 +1,222 @@
+"""
+Qdrant Storage - fixed version
+- scroll returns point IDs (not just payload)
+- delete uses correct PointIdsList format
+- connection pooling
+"""
+import json
+import logging
+from typing import Any
+
+import httpx
+
+log = logging.getLogger("qdrant-store")
+
+
+class QdrantStore:
+    def __init__(
+        self,
+        host: str = "localhost",
+        port: int = 6333,
+        collection: str = "memory_recall",
+        embedding_url: str = "http://localhost:11434/api/embeddings",
+        embedding_model: str = "bge-m3",
+        embedding_dim: int = 1024,
+    ):
+        self.host = host
+        self.port = port
+        self.collection = collection
+        self.embedding_url = embedding_url
+        self.embedding_model = embedding_model
+        self.embedding_dim = embedding_dim
+        self.base_url = f"http://{host}:{port}"
+        self._initialized = False
+        self._client: httpx.AsyncClient | None = None
+
+    async def _get_client(self) -> httpx.AsyncClient:
+        if self._client is None or self._client.is_closed:
+            self._client = httpx.AsyncClient(timeout=60.0)
+        return self._client
+
+    async def init(self) -> None:
+        if self._initialized:
+            return
+        try:
+            client = await self._get_client()
+            resp = await client.get(f"{self.base_url}/collections/{self.collection}")
+            if resp.status_code == 200:
+                log.info(f"Collection '{self.collection}' already exists")
+                self._initialized = True
+                return
+
+            from qdrant_client.models import Distance, VectorParams
+            create_payload = {
+                "vectors": {
+                    "size": self.embedding_dim,
+                    "distance": "Cosine",
+                }
+            }
+            resp = await client.put(
+                f"{self.base_url}/collections/{self.collection}",
+                json={"vectors": create_payload["vectors"]},
+            )
+            if resp.status_code in (200, 201):
+                log.info(f"Created collection '{self.collection}'")
+                self._initialized = True
+            else:
+                log.warning(f"Failed to create collection: {resp.text}")
+                self._initialized = True
+
+        except Exception as e:
+            log.warning(f"Qdrant init failed (non-fatal): {e}")
+            self._initialized = True
+
+    async def embed(self, text: str) -> list[float]:
+        try:
+            client = await self._get_client()
+            resp = await client.post(
+                self.embedding_url,
+                json={"model": self.embedding_model, "prompt": text},
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            emb = data.get("embedding", [])
+            if emb and len(emb) == self.embedding_dim:
+                return emb
+            return []
+        except Exception as e:
+            log.error(f"Embedding failed: {e}")
+            return []
+
+    async def upsert(self, memory_id: str, vector: list[float], payload: dict) -> str:
+        client = await self._get_client()
+        point = {
+            "id": memory_id,
+            "vector": vector,
+            "payload": payload,
+        }
+        resp = await client.put(
+            f"{self.base_url}/collections/{self.collection}/points",
+            json={"points": [point]},
+        )
+        resp.raise_for_status()
+        return memory_id
+
+    async def vector_search(
+        self, query: str, limit: int = 10, score_threshold: float = 0.0
+    ) -> list[dict]:
+        vector = await self.embed(query)
+        if not vector:
+            return []
+
+        client = await self._get_client()
+        search_body: dict[str, Any] = {
+            "vector": vector,
+            "limit": limit,
+            "with_payload": True,
+        }
+        if score_threshold > 0:
+            search_body["score_threshold"] = score_threshold
+
+        resp = await client.post(
+            f"{self.base_url}/collections/{self.collection}/points/search",
+            json=search_body,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        results = data.get("result", [])
+
+        memories = []
+        for r in results:
+            mem = dict(r.get("payload", {}))
+            mem["id"] = r.get("id")
+            mem["score"] = r.get("score", 0)
+            memories.append(mem)
+        return memories
+
+    async def scroll(self, limit: int = 1000) -> tuple[list[dict], list[str]]:
+        client = await self._get_client()
+        all_points: list[dict] = []
+        all_ids: list[str] = []
+        offset: str | None = None
+
+        while True:
+            body: dict[str, Any] = {
+                "collection_name": self.collection,
+                "limit": min(limit, 256),
+                "with_payload": True,
+            }
+            if offset:
+                body["offset"] = offset
+
+            resp = await client.post(
+                f"{self.base_url}/collections/{self.collection}/points/scroll",
+                json=body,
+            )
+
+            if resp.status_code != 200:
+                log.error(f"Scroll failed: {resp.text}")
+                break
+
+            data = resp.json()
+            points = data.get("result", {}).get("points", [])
+            next_page_offset = data.get("result", {}).get("next_page_offset")
+
+            for p in points:
+                mem = dict(p.get("payload", {}))
+                mem["id"] = p.get("id")
+                all_points.append(mem)
+                all_ids.append(str(p.get("id")))
+
+            if not next_page_offset:
+                break
+            offset = next_page_offset
+
+        return all_points, all_ids
+
+    async def fetch_by_ids(self, memory_ids: list[str]) -> list[dict]:
+        if not memory_ids:
+            return []
+        client = await self._get_client()
+        resp = await client.post(
+            f"{self.base_url}/collections/{self.collection}/points/{','.join(memory_ids)}",
+            params={"with_payload": "true"},
+        )
+        if resp.status_code not in (200, 201):
+            return []
+        data = resp.json()
+        points = data.get("result", [])
+        memories = []
+        for p in points:
+            if p:
+                mem = dict(p.get("payload", {}))
+                mem["id"] = p.get("id")
+                memories.append(mem)
+        return memories
+
+    async def delete(self, memory_id: str) -> None:
+        from qdrant_client.models import PointIdsList
+
+        client = await self._get_client()
+        resp = await client.post(
+            f"{self.base_url}/collections/{self.collection}/points/delete",
+            json={"points": [memory_id]},
+        )
+        if resp.status_code not in (200, 201):
+            log.error(f"Delete failed: {resp.text}")
+
+    async def count(self) -> int:
+        client = await self._get_client()
+        resp = await client.get(
+            f"{self.base_url}/collections/{self.collection}/points/count",
+            params={"exact": "true"},
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            return data.get("result", {}).get("count", 0)
+        return 0
+
+    async def close(self) -> None:
+        if self._client:
+            await self._client.aclose()
+            self._client = None

@@ -1,44 +1,41 @@
 {
   "id": "memory-recall",
   "name": "Memory Recall",
-  "description": "L1/L2/L3 memory recall plugin for OpenClaw agents with Qdrant vector storage",
+  "description": "L1/L2/L3 cascade memory recall plugin: vector (Qdrant) + BM25 (jieba) + graph expansion (graphify). Requires memory-recall-server (Python) running on port 8765.",
   "version": "0.2.0",
   "kind": "memory",
   "configSchema": {
     "type": "object",
     "additionalProperties": false,
     "properties": {
-      "qdrant": {
-        "type": "object",
-        "properties": {
-          "host": { "type": "string", "default": "localhost" },
-          "port": { "type": "integer", "default": 6333 },
-          "collection": { "type": "string", "default": "memory_recall" }
-        }
+      "serverUrl": {
+        "type": "string",
+        "default": "http://localhost:8765",
+        "description": "Memory Recall Python server URL"
       },
-      "embedding": {
-        "type": "object",
-        "properties": {
-          "baseURL": { "type": "string", "default": "http://localhost:11434" },
-          "model": { "type": "string", "default": "bge-m3" },
-          "dimensions": { "type": "integer", "default": 1024 }
-        }
+      "autoStore": {
+        "type": "boolean",
+        "default": true,
+        "description": "Automatically store user/assistant messages"
       },
       "autoRecall": {
         "type": "boolean",
-        "default": true
+        "default": true,
+        "description": "Automatically inject relevant memories before each reply"
       },
       "autoRecallMaxItems": {
         "type": "integer",
         "minimum": 1,
         "maximum": 20,
-        "default": 3
+        "default": 3,
+        "description": "Maximum memories to inject per turn"
       },
       "autoRecallMaxChars": {
         "type": "integer",
         "minimum": 64,
         "maximum": 8000,
-        "default": 600
+        "default": 600,
+        "description": "Maximum total characters injected"
       },
       "l1": {
         "type": "object",
