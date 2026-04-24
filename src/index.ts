@@ -64,7 +64,7 @@ const memoryRecallPlugin = {
     "L1/L2/L3 cascade memory recall with async extraction. Stores user/assistant messages and injects relevant memories before LLM response.",
   kind: "memory" as const,
 
-  async register(api: OpenClawPluginApi) {
+  register(api: OpenClawPluginApi) {
     const config = parsePluginConfig(api.pluginConfig);
     const serverUrl = config.serverUrl ?? SERVER_BASE;
 
