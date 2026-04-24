@@ -1,6 +1,6 @@
 # Memory Recall Plugin
 
-> L1/L2/L3 cascade memory recall for OpenClaw: vector (Qdrant) + BM25 (jieba) + graph expansion (graphify)
+> L1/L2/L3 cascade memory recall for OpenClaw: vector (Qdrant) + BM25 + graph expansion (networkx)
 
 ## 版本历史
 
@@ -8,7 +8,7 @@
 |-----|------|---------|
 | 0.1.0 | 2026-04-22 | 初始版本: Qdrant存储 + Ollama bge-m3 embedding + recall_memories工具 |
 | 0.2.0 | 2026-04-22 | 添加before_agent_start hook自动注入; 修复tools.byProvider配置 |
-| **0.3.0** | 2026-04-24 | **Phase 1: 重构为 TS plugin + Python server 架构** |
+| **0.3.0** | 2026-04-24 | **Phase 1: TS plugin + Python server 架构；async LLM extraction；MLP 6-category；enhanced embedding；移除 blocking warmup** |
 
 ## 架构
 
@@ -19,9 +19,9 @@ OpenClaw Gateway
             ├── 3 hooks: message_received / agent_end / before_prompt_build
             └── HTTP → http://localhost:8765 (Python server)
                         ├── L1: Qdrant vector search
-                        ├── L2: BM25 + jieba keyword search
+                        ├── L2: BM25 (jieba-free, bigram fallback)
                         ├── L3: graphify (networkx) graph expansion
-                        ├── LLM extraction: 6W + category (Ollama qwen2.5)
+                        ├── LLM extraction: 6W + MLP category (qwen3.5:9b, async)
                         ├── BM25 index: ~/.memory-recall/data/bm25_index.json
                         └── Graph: ~/.memory-recall/data/memory_graph.json
 ```
@@ -40,8 +40,8 @@ docker run -d --name qdrant -p 6333:6333 -p 6334:6334 qdrant/qdrant
 # bge-m3 for embeddings
 ollama pull bge-m3
 
-# qwen2.5 for LLM extraction (6W + category)
-ollama pull qwen2.5
+# qwen3.5:9b for LLM extraction (6W + MLP category)
+ollama pull qwen3.5:9b
 ```
 
 ### 3. Python 环境
@@ -66,15 +66,23 @@ npm install
 ### 5. OpenClaw 插件安装
 
 ```bash
-openclaw plugins install --link ~/projects/memory-recall
-openclaw gateway restart
+cd ~/projects/memory-recall
+openclaw plugins install . --dangerously-force-unsafe-install
 ```
 
-## 配置
+### 6. OpenClaw 配置
+
+编辑 `~/.openclaw/openclaw.json`，确保 `plugins` 区块包含以下内容：
 
 ```json
 {
   "plugins": {
+    "allow": [
+      "memory-recall",
+      "minimax",
+      "browser",
+      "acpx"
+    ],
     "entries": {
       "memory-recall": {
         "enabled": true,
@@ -85,20 +93,36 @@ openclaw gateway restart
           "autoRecallMaxItems": 3,
           "autoRecallMaxChars": 600
         }
+      },
+      "memory-core": {
+        "enabled": false
+      },
+      "memory-lancedb": {
+        "enabled": false
       }
     },
     "slots": {
       "memory": "memory-recall"
     }
-  },
-  "tools": {
-    "byProvider": {
-      "minimax-portal": {
-        "alsoAllow": ["recall_memories", "store_memory", "forget_memory", "update_memory"]
-      }
-    }
   }
 }
+```
+
+> 注意：`plugins.allow` 必须包含 `memory-recall`，否则 plugin 会被忽略。
+> `slots.memory` 独占后，`memory-core` 和 `memory-lancedb` 会自动禁用。
+
+重启 gateway：
+```bash
+openclaw gateway restart
+```
+
+验证加载：
+```bash
+openclaw plugins list | grep memory-recall
+openclaw plugins doctor 2>&1 | grep memory-recall
+```
+
+## 配置
 ```
 
 | 配置 | 说明 | 默认值 |
@@ -118,6 +142,7 @@ openclaw gateway restart
 | `EMBEDDING_URL` | Ollama embedding API | `http://localhost:11434/api/embeddings` |
 | `EMBEDDING_MODEL` | Embedding 模型 | `bge-m3` |
 | `OLLAMA_URL` | Ollama generate API | `http://localhost:11434/api/generate` |
+| `LLM_MODEL` | Extraction LLM 模型 | `qwen3.5:9b` |
 | `MEMORY_RECALL_SERVER` | Python server（TS 端） | `http://localhost:8765` |
 
 ## 工具
@@ -173,6 +198,8 @@ curl -X POST http://localhost:8765/recall -H "Content-Type: application/json" -d
 
 ## 已知问题
 
-- LLM extraction 使用 qwen2.5，如果 ollama 未安装会自动 fallback
-- BM25 index 在首次使用或更新后自动重建
+- LLM extraction 使用 qwen3.5:9b，如果 ollama 未安装会自动 fallback 到 regex 规则
+- BM25 index 在首次使用或更新后自动重建（小 corpus 时 BM25 分数接近 0，随数据量增加改善）
 - Graph expansion 使用 networkx BFS，如果 networkx 未安装则降级为 cooccurrence 计数
+- `register` 必须是同步函数（OpenClaw plugin 规范要求）
+- plugin 安装需要 `--dangerously-force-unsafe-install`（因为使用了 `process.env` + `fetch`）
