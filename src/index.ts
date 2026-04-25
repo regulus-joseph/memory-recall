@@ -21,7 +21,7 @@ function parsePluginConfig(value: unknown): MemoryRecallConfig {
   return value as MemoryRecallConfig;
 }
 
-const PYTHON_BIN = process.env.PYTHON_BIN || "python3";
+const PYTHON_BIN = process.env.PYTHON_BIN || "/home/marlon-wei/.memory-recall-venv/bin/python";
 
 class WorkerClient {
   private proc: ReturnType<typeof spawn>;
