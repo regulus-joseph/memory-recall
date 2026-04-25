@@ -14,3 +14,11 @@ memory_graph.json
 *.log
 dist/
 build/
+
+# Graphify cache (generated)
+graphify-out/cache/
+.graphify_ast.json
+.graphify_detect.json
+
+# LanceDB data (per-agent)
+~/.memory-recall/
