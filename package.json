@@ -1,6 +1,6 @@
 {
   "name": "memory-recall",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "type": "module",
   "description": "L1/L2/L3 memory recall plugin for OpenClaw with per-agent LanceDB storage, Weibull decay, and progressive compaction",
   "main": "src/index.ts",
@@ -25,7 +25,7 @@
   },
   "changelog": [
     {
-      "version": "0.2.0",
+      "version": "0.4.0",
       "date": "2026-04-22",
       "changes": [
         "添加before_agent_start hook自动注入功能",

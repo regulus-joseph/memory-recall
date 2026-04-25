@@ -2,7 +2,7 @@
   "id": "memory-recall",
   "name": "Memory Recall",
   "description": "L1/L2/L3 cascade memory recall: per-agent LanceDB (vector + FTS) + NetworkX graph expansion. Async LLM extraction (6w+confidence), Weibull decay, progressive compaction. No external server needed.",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "kind": "memory",
   "configSchema": {
     "type": "object",
