@@ -1,4 +1,5 @@
 #!/bin/bash
 cd /home/marlon-wei/projects/memory-recall
-/home/marlon-wei/bin/python3 src/worker.py &
-exec /home/marlon-wei/bin/python3 src/server.py
+# TS plugin spawns worker.py directly via child_process
+# start.sh kept for manual testing only
+~/.memory-recall-venv/bin/python src/worker.py

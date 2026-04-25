@@ -1,8 +1,8 @@
 {
   "name": "memory-recall",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "type": "module",
-  "description": "L1/L2/L3 memory recall plugin for OpenClaw with Qdrant vector storage",
+  "description": "L1/L2/L3 memory recall plugin for OpenClaw with per-agent LanceDB storage, Weibull decay, and progressive compaction",
   "main": "src/index.ts",
   "openclaw": {
     "extensions": [
@@ -10,11 +10,14 @@
     ]
   },
   "scripts": {
-    "test": "node --test tests/all.test.mjs",
+    "test": "node --test tests/all.test.mjs && node --test tests/per-agent-isolation.test.mjs && node --test tests/worker-concurrency.test.mjs && node --test tests/bm25-negative-score.test.mjs && node --test tests/worker-smoke.test.mjs",
     "test:unit": "node --test tests/all.test.mjs",
+    "test:worker": "node --test tests/worker-smoke.test.mjs && node --test tests/per-agent-isolation.test.mjs && node --test tests/worker-concurrency.test.mjs",
     "test:smoke": "node smoke-test.mjs"
   },
   "dependencies": {
+    "@lancedb/lancedb": "^0.27.2",
+    "@lancedb/lancedb-linux-x64-gnu": "^0.27.2",
     "@sinclair/typebox": "^0.34.49"
   },
   "devDependencies": {

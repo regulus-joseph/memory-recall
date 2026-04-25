@@ -1,18 +1,13 @@
 {
   "id": "memory-recall",
   "name": "Memory Recall",
-  "description": "L1/L2/L3 cascade memory recall plugin: vector (Qdrant) + BM25 (jieba) + graph expansion (graphify). Requires memory-recall-server (Python) running on port 8765.",
-  "version": "0.2.0",
+  "description": "L1/L2/L3 cascade memory recall: per-agent LanceDB (vector + FTS) + NetworkX graph expansion. Async LLM extraction (6w+confidence), Weibull decay, progressive compaction. No external server needed.",
+  "version": "0.3.0",
   "kind": "memory",
   "configSchema": {
     "type": "object",
     "additionalProperties": false,
     "properties": {
-      "serverUrl": {
-        "type": "string",
-        "default": "http://localhost:8765",
-        "description": "Memory Recall Python server URL"
-      },
       "autoStore": {
         "type": "boolean",
         "default": true,
@@ -37,26 +32,17 @@
         "default": 600,
         "description": "Maximum total characters injected"
       },
-      "l1": {
-        "type": "object",
-        "properties": {
-          "enabled": { "type": "boolean", "default": true },
-          "minScore": { "type": "number", "default": 0.0 }
-        }
+      "decayEnabled": {
+        "type": "boolean",
+        "default": true,
+        "description": "Enable Weibull decay + compaction timer (runs every decayIntervalHours)"
       },
-      "l2": {
-        "type": "object",
-        "properties": {
-          "enabled": { "type": "boolean", "default": true },
-          "minScore": { "type": "number", "default": 0.3 }
-        }
-      },
-      "l3": {
-        "type": "object",
-        "properties": {
-          "enabled": { "type": "boolean", "default": true },
-          "triggerThreshold": { "type": "number", "default": 0.6 }
-        }
+      "decayIntervalHours": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 168,
+        "default": 24,
+        "description": "Hours between decay/compaction cycles"
       }
     }
   },
@@ -69,9 +55,9 @@
       "label": "Max Memory Items",
       "help": "Maximum memories to inject per turn"
     },
-    "autoRecallMaxChars": {
-      "label": "Max Characters",
-      "help": "Maximum total characters injected"
+    "decayEnabled": {
+      "label": "Decay & Compaction",
+      "help": "Enable periodic Weibull decay + similarity compaction (recommended: on)"
     }
   }
 }

@@ -1,7 +1,7 @@
 # memory-recall 改造方案
 
-> 文档版本：v2.3
-> 最后更新：2026-04-24
+> 文档版本：v2.5
+> 最后更新：2026-04-25
 > 负责人：marlon-wei
 > 源码路径：~/projects/memory-recall
 
@@ -16,10 +16,12 @@
 | v2.1 | 2026-04-24 | + 词表自动维护（systemd timer + LLM 对比 + 日志输出） |
 | v2.2 | 2026-04-24 | + BM25 增量更新（add/remove/update 不重建）+ jieba 迁移 + venv 隔离 |
 | v2.3 | 2026-04-24 | + 测试框架（25 个 node --test）+ 测试通过 |
+| v2.4 | 2026-04-25 | + Worker Refactor：server.py → worker.py (stdio JSON-RPC)；TS plugin 用 child_process.spawn 管理 worker；per-agent BM25/Graph 文件隔离；fcntl.flock 文件锁；删除 HTTP 层 |
+| v2.5 | 2026-04-25 | + LanceDB 迁移：Qdrant 替换为 per-agent LanceDB（L1 向量 + L2 FTS）；+ 异步 LLM extraction（6w + category + confidence + temporal_type）；+ 衰减引擎（Weibull 拉伸指数，composite = 0.4×recency + 0.3×frequency + 0.3×intrinsic）；+ Compactor（cosine similarity 聚类合并）；+ registerService decay timer（gateway 托管，每24h）；+ Tier 保护（core 禁止删除/合并）；+ 图多关系边（same_when / same_where）；+ 21 字段 schema；+ 全部 50 测试通过 |
 
 ---
 
-## 当前实现状态（v2.0）
+## 当前实现状态（v2.4）
 
 ### 架构总览
 
@@ -28,27 +30,31 @@
 │                    OpenClaw Gateway (TypeScript)                   │
 │  memory-recall plugin → registerMemoryCapability stub             │
 │  4 tools: memory_recall / memory_store / memory_forget / update  │
+│  Hooks: message_received (auto-store), agent_end (auto-store)   │
+│         before_prompt_build (auto-recall)                       │
 └───────────────────────────┬──────────────────────────────────────┘
-                            │ HTTP (fetch)
+                            │ child_process.spawn (stdio JSON-RPC)
                             ▼
 ┌──────────────────────────────────────────────────────────────────┐
-│            Memory Recall Server (Python FastAPI)                    │
-│                      port: 8765                                    │
+│              Memory Recall Worker (Python stdio JSON-RPC)            │
+│                   per-agent BM25 + Graph files                    │
 │                                                                  │
-│  POST /store   → 规则提取 category → 同步返回 (毫秒级)           │
-│  POST /recall  → L1向量 + L2 BM25 + L3 图扩展 → 三路融合排序     │
-│  POST /forget → Qdrant + BM25 + Graph 三端删除                 │
-│  POST /update → payload 更新                                      │
-│  GET  /stats  → memory/BM25/Graph/Queue 计数                    │
-│  GET  /health → 服务健康检查                                      │
+│  store    → 规则提取 category → 同步返回 (毫秒级)               │
+│  recall   → L1向量 + L2 BM25 + L3 图扩展 → 三路融合排序         │
+│  forget   → BM25 + Graph 两端删除 (Qdrant 已移除)                │
+│  update   → payload 更新                                          │
+│  stats    → memory/BM25/Graph 计数                              │
+│  health   → worker 健康检查                                      │
 └───────────────────────────┬──────────────────────────────────────┘
                             │
         ┌───────────────────┼───────────────────────┐
         ▼                   ▼                       ▼
-   Qdrant              BM25 Index             Graph (NetworkX)
-   (向量存储)          (JSON文件)              (JSON文件)
-   port: 6333        ~/.memory-recall/      ~/.memory-recall/
-                       data/bm25_index.json    data/memory_graph.json
+   (向量已移除)         BM25 Index             Graph (NetworkX)
+   (Qdrant移除)        (per-agent JSON)       (per-agent JSON)
+                      fcntl.flock             fcntl.flock
+```
+                        ~/.memory-recall/data/
+                         bm25_{agent_id}.json  graph_{agent_id}.json
 ```
 
 ### 目录结构
@@ -56,16 +62,16 @@
 ```
 memory-recall/
 ├── src/
-│   ├── server.py           # FastAPI 服务入口（6个端点）
-│   ├── worker.py           # 后台 worker（暂未使用，保留）
+│   ├── worker.py           # stdio JSON-RPC server（child_process.spawn 启动）
 │   ├── rule_extractor.py  # 规则提取：分词 + category + 6w
-│   ├── lark_tok.py        # lark-based 中文分词（词典驱动最大正向匹配）
+│   ├── lark_tok.py        # jieba 分词（venv 隔离，user_dict.txt）
+│   ├── dict_maintenance.py # 词表维护（systemd timer，每天 03:00）
 │   └── core/
-│       ├── qdrant_store.py    # Qdrant 向量存储 + 去重检查
-│       ├── bm25_index.py      # BM25 全文索引（rank_bm25）
-│       └── graph_store.py      # NetworkX 图（session/cooccur/category_overlap/word_overlap）
-├── start.sh                # systemd 启动脚本
-├── DEPLOY.md              # 部署文档
+│       ├── bm25_index.py      # BM25 全文索引（rank_bm25），fcntl.flock
+│       └── graph_store.py      # NetworkX 图（session/cooccur/category_overlap），fcntl.flock
+├── start.sh                # 手动测试 worker.py（TS plugin 自主管理 worker 生命周期）
+├── deploy.sh               # 部署脚本（无 systemd service）
+├── DEPLOY.md               # 部署文档
 └── TRANSFORMATION_PLAN.md # 本文档
 ```
 
@@ -75,22 +81,20 @@ memory-recall/
 
 ### 存储层
 
-**Qdrant (向量)**
-- Collection: `memory_recall`
-- 向量维度: 1024 (bge-m3)
-- 向量生成: Ollama bge-m3 via `/api/embeddings`，字段用 `prompt`（非 `input`）
-- Payload 字段: content, agent_id, conversation_id, category, 6w, importance, stored_at, state, access_count, last_accessed, graph_edges, extraction_done
+**Qdrant (向量)** — 已移除
 
 **BM25 (全文)**
 - 引擎: `rank_bm25.BM25Okapi`
-- 分词: lark-based 词典最大正向匹配（无外部中文依赖）
-- 索引文件: `~/.memory-recall/data/bm25_index.json`
-- 字段: corpus 存 `{doc_id: {content, agent_id}}`
-- 问题: 每次 store 全量重建（待优化）
-- ⚠️ 词表：从 lark FMM 迁移到 jieba，venv 隔离（~/.memory-recall-venv/），用户词典 user_dict.txt 存储 LLM 发现的新词
+- 分词: jieba（venv 隔离：~/.memory-recall-venv/），用户词典 `user_dict.txt`
+- 索引文件: `~/.memory-recall/data/bm25_{agent_id}.json`（per-agent 隔离）
+- 增量: add 触发 rebuild（阈值 20），update/remove 累积阈值后 rebuild
+- 文件锁: `fcntl.flock` LOCK_EX + LOCK_UN
 
 **Graph (关联)**
 - 引擎: NetworkX + JSON 文件持久化
+- 图文件: `~/.memory-recall/data/graph_{agent_id}.json`（per-agent 隔离）
+- 边类型: session, category_overlap, recall_cooccur
+- 文件锁: `fcntl.flock` LOCK_EX + LOCK_UN
 - 边类型:
   - `session`: 同 conversation_id 的记忆互连
   - `recall_cooccur`: store 时同次 recall 结果互连
@@ -216,33 +220,51 @@ store(content)
 ## 开发命令
 
 ```bash
-# 启动服务
+# 手动测试 worker.py（TS plugin 会自动通过 child_process.spawn 启动）
 cd ~/projects/memory-recall
-python src/server.py
+~/.memory-recall-venv/bin/python src/worker.py
 
-# 或通过 systemd
-systemctl --user start memory-recall.service
-systemctl --user status memory-recall.service
-
-# 重启
-systemctl --user restart memory-recall.service
-
-# 日志
-tail -f /tmp/memory-recall.log
-
-# 健康检查
-curl http://localhost:8765/health
+# JSON-RPC 测试
+echo '{"jsonrpc":"2.0","id":1,"method":"health","params":{}}' | ~/.memory-recall-venv/bin/python src/worker.py
 
 # 存储测试
-curl -s http://localhost:8765/store -X POST \
-  -H "Content-Type: application/json" \
-  -d '{"content":"我住在深圳","agent_id":"test"}'
+echo '{"jsonrpc":"2.0","id":2,"method":"store","params":{"content":"我住在深圳","agent_id":"test"}}' \
+  | ~/.memory-recall-venv/bin/python src/worker.py
 
 # 召回测试
-curl -s http://localhost:8765/recall -X POST \
-  -H "Content-Type: application/json" \
-  -d '{"query":"住在哪","agent_id":"test","max_results":3}'
+echo '{"jsonrpc":"2.0","id":3,"method":"recall","params":{"query":"住在哪","agent_id":"test","max_results":3}}' \
+  | ~/.memory-recall-venv/bin/python src/worker.py
 
-# 统计
-curl http://localhost:8765/stats
+# 词表维护
+~/.memory-recall-venv/bin/python src/dict_maintenance.py --dry-run
 ```
+
+---
+
+## LanceDB API 注意事项（v0.30.2）
+
+### `.query()` vs `.search()`
+- **错误**：`table.query().where(...)` — `query()` 方法不存在
+- **正确**：`table.search().where(...)` — 使用 `search()` 作为入口
+- `search()` 不传参数时，仅执行过滤查询（无需向量）
+
+### `.add()` vs `.update()`
+- `table.add([row])` **追加**新行（不更新已有行），导致重复记录
+- `table.update(where=..., values={...})` **原地更新**匹配行的字段
+- 用于 `cmd_update`：替换 `table.add()` 为 `table.update(where=f'id = "{memory_id}"', values={...})`
+- 用于 `cmd_store` + `cmd_update` 顺序：必须用 `update` 否则产生重复行
+
+### 表目录结构
+- 每个 agent 数据库目录：`~/.memory-recall/data/{agent_id}/`
+- LanceDB 表存储在：`memories.lance` 子目录
+- 图数据：`graph.json`
+- **不要**检查 `lance.db` 文件（不存在），检查 `memories.lance` 目录
+
+### 数据目录扫描
+- 遍历 `DATA_DIR.iterdir()`，过滤 `subdir.is_dir()` + `(subdir / "memories.lance").exists()`
+- agent_id 映射：`subdir.name`（`_dir_to_agent_id`）
+
+### 缓存与跨进程
+- `_lance_instances` 是进程内缓存（TS plugin 每次启动新 worker）
+- `cmd_update`/`cmd_forget` 需要跨进程查找 agent_id：扫描所有 `memories.lance` 目录
+- `_find_agent_for_memory(memory_id)`：先查缓存 `_lance_instances`，再扫描目录

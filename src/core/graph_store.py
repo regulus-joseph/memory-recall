@@ -3,6 +3,7 @@ Memory Graph Store - lightweight graph using networkx
 File-based persistence: memory_graph.json
 L3 graph expansion + co-occurrence edge building
 """
+import fcntl
 import json
 import logging
 from collections import defaultdict
@@ -48,6 +49,8 @@ class GraphStore:
                 log.info(f"Loaded graph: {len(self.nodes)} nodes, {len(self.edges)} edges")
             except Exception as e:
                 log.warning(f"Failed to load graph: {e}")
+        else:
+            self.graph_file.touch()
         self._build_nx_graph()
 
     def _save(self) -> None:
@@ -55,18 +58,24 @@ class GraphStore:
             cooc_serializable = {
                 src: dict(targets) for src, targets in self.cooccurrence.items()
             }
-            with open(self.graph_file, "w") as f:
-                json.dump(
-                    {
-                        "nodes": self.nodes,
-                        "edges": self.edges,
-                        "cooccurrence": cooc_serializable,
-                        "session_buckets": dict(self.session_buckets),
-                    },
-                    f,
-                    ensure_ascii=False,
-                )
-        except Exception as e:
+            with open(self.graph_file, "r+") as f:
+                fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+                try:
+                    f.seek(0)
+                    json.dump(
+                        {
+                            "nodes": self.nodes,
+                            "edges": self.edges,
+                            "cooccurrence": cooc_serializable,
+                            "session_buckets": dict(self.session_buckets),
+                        },
+                        f,
+                        ensure_ascii=False,
+                    )
+                    f.truncate()
+                finally:
+                    fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+        except (IOError, OSError) as e:
             log.error(f"Failed to save graph: {e}")
 
     def _build_nx_graph(self) -> None:
@@ -84,14 +93,19 @@ class GraphStore:
         self._graph = G
 
     def add_node(self, memory_id: str, attrs: dict) -> None:
-        self.nodes[memory_id] = {
+        existing = self.nodes.get(memory_id, {})
+        existing.update({
             "content": attrs.get("content", ""),
             "category": attrs.get("category", "other"),
             "agent_id": attrs.get("agent_id", ""),
             "conversation_id": attrs.get("conversation_id", ""),
             "importance": attrs.get("importance", 0.5),
             "stored_at": attrs.get("stored_at", ""),
-        }
+            "who": attrs.get("who", ""),
+            "when": attrs.get("when", ""),
+            "where": attrs.get("where", ""),
+        })
+        self.nodes[memory_id] = existing
         self._build_nx_graph()
 
     def build_category_overlap(self, memory_id: str, category: str, stored_at: str, window_hours: int = 24) -> None:
@@ -136,11 +150,7 @@ class GraphStore:
 
     def update_node(self, memory_id: str, attrs: dict) -> None:
         if memory_id in self.nodes:
-            self.nodes[memory_id].update({
-                "content": attrs.get("content", ""),
-                "category": attrs.get("category", "other"),
-                "importance": attrs.get("importance", 0.5),
-            })
+            self.nodes[memory_id].update(attrs)
         self._build_nx_graph()
         self._save()
 

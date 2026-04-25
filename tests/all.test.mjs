@@ -230,9 +230,9 @@ describe("plugin smoke", () => {
     assert.ok(manifest.configSchema);
   });
 
-  it("server.py compiles without syntax errors", () => {
+  it("worker.py compiles without syntax errors", () => {
     return new Promise((resolve, reject) => {
-      const proc = spawn(PY, ["-m", "py_compile", path.join(PROJ, "src/server.py")], { timeout: 10000 });
+      const proc = spawn(PY, ["-m", "py_compile", path.join(PROJ, "src/worker.py")], { timeout: 10000 });
       let err = "";
       proc.stderr.on("data", (d) => (err += d));
       proc.on("close", (code) => {

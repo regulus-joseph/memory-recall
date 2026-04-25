@@ -3,6 +3,7 @@ BM25 Index with incremental update support.
 jieba tokenization, file-based persistence.
 增量策略：add/remove/update 不重建索引，累积 N 次或显式触发 rebuild。
 """
+import fcntl
 import json
 import logging
 import re
@@ -56,16 +57,24 @@ class BM25Index:
                 log.warning(f"Failed to load BM25 index: {e}")
                 self.corpus = {}
                 self._deleted_ids = set()
+        else:
+            self.index_file.touch()
         self._rebuild()
 
     def _save(self) -> None:
         try:
-            with open(self.index_file, "w") as f:
-                json.dump({
-                    "corpus": self.corpus,
-                    "deleted": list(self._deleted_ids),
-                }, f, ensure_ascii=False)
-        except Exception as e:
+            with open(self.index_file, "r+") as f:
+                fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+                try:
+                    f.seek(0)
+                    json.dump({
+                        "corpus": self.corpus,
+                        "deleted": list(self._deleted_ids),
+                    }, f, ensure_ascii=False)
+                    f.truncate()
+                finally:
+                    fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+        except (IOError, OSError) as e:
             log.error(f"Failed to save BM25 index: {e}")
 
     def _tokenize(self, text: str) -> list[str]:
@@ -75,7 +84,7 @@ class BM25Index:
             tokens = list(jieba.cut(text))
         else:
             tokens = self._fallback_tokenize(text)
-        return [t for t in tokens if len(t) > 1]
+        return [t for t in tokens if len(t) >= 1]
 
     def _fallback_tokenize(self, text: str) -> list[str]:
         tokens = []
