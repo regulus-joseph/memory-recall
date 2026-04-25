@@ -21,7 +21,7 @@
 
 ---
 
-## 当前实现状态（v2.4）
+## 当前实现状态（v2.5）
 
 ### 架构总览
 
@@ -32,29 +32,33 @@
 │  4 tools: memory_recall / memory_store / memory_forget / update  │
 │  Hooks: message_received (auto-store), agent_end (auto-store)   │
 │         before_prompt_build (auto-recall)                       │
+│  registerService: decay timer (gateway托管, 每24h)              │
 └───────────────────────────┬──────────────────────────────────────┘
-                            │ child_process.spawn (stdio JSON-RPC)
-                            ▼
+                             │ child_process.spawn (stdio JSON-RPC)
+                             ▼
 ┌──────────────────────────────────────────────────────────────────┐
 │              Memory Recall Worker (Python stdio JSON-RPC)            │
-│                   per-agent BM25 + Graph files                    │
+│                   per-agent LanceDB + NetworkX Graph              │
 │                                                                  │
-│  store    → 规则提取 category → 同步返回 (毫秒级)               │
-│  recall   → L1向量 + L2 BM25 + L3 图扩展 → 三路融合排序         │
-│  forget   → BM25 + Graph 两端删除 (Qdrant 已移除)                │
-│  update   → payload 更新                                          │
-│  stats    → memory/BM25/Graph 计数                              │
-│  health   → worker 健康检查                                      │
+│  store     → 规则提取 category → 异步 LLM extraction → 写 LanceDB │
+│  recall    → L1向量(LanceDB) + L2 FTS(LanceDB) + L3 图扩展    │
+│  forget    → LanceDB 删除 + Graph 删除 (core 免疫)                │
+│  update    → LanceDB 更新 + 重新 LLM extraction                  │
+│  compact   → cosine similarity 聚类合并                          │
+│  decay_scan → Weibull composite score → 删除/合并低分记忆          │
+│  graph_rebuild → same_when / same_where 多关系边                │
+│  health    → worker 健康检查                                      │
 └───────────────────────────┬──────────────────────────────────────┘
-                            │
-        ┌───────────────────┼───────────────────────┐
-        ▼                   ▼                       ▼
-   (向量已移除)         BM25 Index             Graph (NetworkX)
-   (Qdrant移除)        (per-agent JSON)       (per-agent JSON)
-                      fcntl.flock             fcntl.flock
+                             │
+         ┌───────────────────┼───────────────────────┐
+         ▼                   ▼                       ▼
+    LanceDB (vector)     LanceDB (FTS)          NetworkX Graph
+    (per-agent .lance)   (per-agent .lance)    (per-agent .json)
+                          jieba tokenizer       same_when / same_where
+                                                fcntl.flock
 ```
-                        ~/.memory-recall/data/
-                         bm25_{agent_id}.json  graph_{agent_id}.json
+~/.memory-recall/data/{agent_id}/
+   memories.lance/         graph.json
 ```
 
 ### 目录结构
@@ -68,7 +72,11 @@ memory-recall/
 │   ├── dict_maintenance.py # 词表维护（systemd timer，每天 03:00）
 │   └── core/
 │       ├── bm25_index.py      # BM25 全文索引（rank_bm25），fcntl.flock
-│       └── graph_store.py      # NetworkX 图（session/cooccur/category_overlap），fcntl.flock
+│       └── graph_store.py      # NetworkX 图（session/cooccur/category_overlap/same_when/same_where），fcntl.flock
+│       ├── lancedb_store.py    # LanceDB 封装（L1 向量 + L2 FTS），per-agent
+│       ├── llm_extractor.py    # 异步 LLM extraction（6w + category + confidence + temporal_type）
+│       ├── decay_engine.py    # Weibull 衰减引擎（composite = 0.4×recency + 0.3×frequency + 0.3×intrinsic）
+│       └── compactor.py       # cosine similarity 聚类合并（阈值 0.88）
 ├── start.sh                # 手动测试 worker.py（TS plugin 自主管理 worker 生命周期）
 ├── deploy.sh               # 部署脚本（无 systemd service）
 ├── DEPLOY.md               # 部署文档
@@ -81,48 +89,46 @@ memory-recall/
 
 ### 存储层
 
-**Qdrant (向量)** — 已移除
-
-**BM25 (全文)**
-- 引擎: `rank_bm25.BM25Okapi`
-- 分词: jieba（venv 隔离：~/.memory-recall-venv/），用户词典 `user_dict.txt`
-- 索引文件: `~/.memory-recall/data/bm25_{agent_id}.json`（per-agent 隔离）
-- 增量: add 触发 rebuild（阈值 20），update/remove 累积阈值后 rebuild
+**LanceDB (向量 + FTS)** — per-agent `.lance` 文件
+- `~/.memory-recall/data/{agent_id}/memories.lance/`
+- Schema: 21 字段（见 README.md）
+- FTS: jieba 分词，`create_fts_index("tokens")`
 - 文件锁: `fcntl.flock` LOCK_EX + LOCK_UN
 
 **Graph (关联)**
 - 引擎: NetworkX + JSON 文件持久化
-- 图文件: `~/.memory-recall/data/graph_{agent_id}.json`（per-agent 隔离）
-- 边类型: session, category_overlap, recall_cooccur
+- 图文件: `~/.memory-recall/data/{agent_id}/graph.json`
+- 边类型: session, cooccur, category_overlap, **same_when**, **same_where**
 - 文件锁: `fcntl.flock` LOCK_EX + LOCK_UN
 - 边类型:
   - `session`: 同 conversation_id 的记忆互连
-  - `recall_cooccur`: store 时同次 recall 结果互连
+  - `cooccur`: store 时同次 recall 结果互连
   - `category_overlap`: 同 category + 24h 内新记忆互连
-  - `word_overlap`: 分词共享≥2个实词的记忆互连
+  - `same_when`: 同 temporal_type + 时间重叠的记忆互连（LLM 提取）
+  - `same_where`: 同 where（地点）字段的记忆互连（LLM 提取）
 
 ### 召回流程（L1/L2/L3）
 
 ```
 输入: query + agent_id + max_results
   │
-  ├─ L1: Qdrant 向量搜索
+  ├─ L1: LanceDB 向量搜索
   │     filter: agent_id
   │     limit: max_results * 3
-  │     输出: {id, score}
-  │
-  ├─ L2: BM25 关键词搜索
-  │     post-filter: agent_id
-  │     limit: max_results * 2
-  │     输出: {id, score}
-  │
-  ├─ Score 融合
-  │     score = 0.7*L1 + 0.3*L2
   │     输出: [(id, score), ...]
   │
-  └─ L3: Graph 扩展
+  ├─ L2: LanceDB FTS (jieba tokenize)
+  │     post-filter: agent_id
+  │     limit: max_results * 2
+  │     输出: [(id, score), ...]
+  │
+  ├─ Score 融合
+  │     score = 0.6*L1 + 0.4*L2
+  │     输出: [(id, score), ...]
+  │
+  └─ L3: Graph 扩展 (NetworkX BFS)
         输入: top-K 候选
-        filter: agent_id (批量查 Qdrant payload)
+        filter: agent_id (批量查 LanceDB payload)
         depth: 2, top_k: max_results
         扩展节点加权: score * 0.5
         输出: [(id, score), ...]
@@ -130,11 +136,11 @@ memory-recall/
 最终: 按 score 排序 → fetch payload → 返回
 ```
 
-### 提取流程（同步，毫秒级）
+### 提取流程（同步 + 异步）
 
 ```
 store(content)
-  ├─ 规则提取 (rule_extractor.py)
+  ├─ 规则提取 (rule_extractor.py) — 同步，毫秒级
   │     ├─ category: 关键词匹配 6 类
   │     ├─ 6w: 正则匹配时间/地点/原因
   │     └─ importance: 关键词加权
@@ -143,21 +149,47 @@ store(content)
   │     ├─ 词典最大正向匹配 (DICT ~200词)
   │     └─ 过滤 STOPWORDS (~50停用词)
   │
-  ├─ 去重检查 (Qdrant scroll, agent_id)
+  ├─ 去重检查 (LanceDB, agent_id)
   │     └─ content 完全匹配 → 直接返回已有 ID
   │
   ├─ 向量化 (Ollama bge-m3)
   │
-  ├─ 写 Qdrant + BM25 + Graph
+  ├─ 写 LanceDB + Graph
   │
-  └─ 立即返回 (pending: false)
+  ├─ 异步 LLM extraction (llm_extractor.py)
+  │     ├─ 6w + category + confidence + temporal_type
+  │     └─ 覆盖 LanceDB 中的字段
+  │
+  └─ 立即返回 (LLM extraction 后台异步)
 ```
 
 ### Agent 隔离
 
-- Qdrant search: `filter: {must: [{key: agent_id, match: value}]}`
-- BM25: post-filter by agent_id（内存过滤）
-- L3 Graph: 批量查 Qdrant payload 取 agent_id 过滤
+- LanceDB: filter by agent_id
+- L3 Graph: 批量查 LanceDB payload 取 agent_id 过滤
+
+### 衰减引擎
+
+```
+decay_scan(limit=50, dry_run=false)
+  ├─ 计算 Weibull composite score
+  │     ├─ recency: 时间衰减，temporal_type 动态半衰期
+  │     ├─ frequency: 指数衰减
+  │     └─ intrinsic: 固定 decay floor = 0.9
+  │
+  ├─ composite = 0.4×recency + 0.3×frequency + 0.3×intrinsic
+  │
+  ├─ stale ≤ 0.3 → compact(阈值 0.88, 最多4轮)
+  ├─ stale ≤ 0.15 → 删除（core 免疫）
+  └─ Tier 保护: importance ≥ 0.7 禁止删除/合并
+
+decay_timer: registerService，每 24h 执行一次
+```
+
+### Agent 隔离
+
+- LanceDB: filter by agent_id
+- Graph: 批量查 LanceDB payload 取 agent_id 过滤
 
 ---
 
@@ -175,24 +207,26 @@ store(content)
 ## 已解决 & 未解决
 
 ### ✅ 已完成
-- Python HTTP 服务（FastAPI）
-- systemd user service 自启 + 自动重启
-- L1/L2/L3 三级召回
-- 规则提取（分词 + category + 6w）同步完成，无 LLM 延迟
-- lark-based 中文分词，零外部中文依赖
-- agent_id 隔离（Qdrant + BM25 + Graph 三层）
+- LanceDB 本地向量 + FTS（无需外部数据库）
+- worker.py stdio JSON-RPC 架构（TS plugin 管理生命周期）
+- L1/L2/L3 三级召回（LanceDB 向量 + LanceDB FTS + NetworkX 图）
+- 规则提取（分词 + category + 6w）同步完成
+- LLM extraction 异步（6w + category + confidence + temporal_type）
+- Weibull decay 引擎（composite = 0.4×recency + 0.3×frequency + 0.3×intrinsic）
+- Compactor cosine similarity 聚类合并（阈值 0.88，最多 4 轮）
+- Tier 保护（importance ≥ 0.7 禁止删除/合并）
+- same_when / same_where 多关系图边
+- registerService decay timer（gateway 托管，每 24h）
+- agent_id 隔离（LanceDB + Graph 两层）
 - 内容去重（store 时检查完全匹配）
-- category_overlap 边（同 category + 24h）
-- word_overlap 边（分词共享≥2词）
-- Recall 返回去重（dedup 前端显示）
+- 21 字段 schema（importance/confidence/temporal_type/access_count/compaction_rounds）
+- 词表维护（jieba + user_dict.txt）
+- 测试框架：node --test，25 个测试（worker/concurrent/BM25Negative/per-agent），`npm test` 运行
 
 ### ⚠️ 待优化
-- BM25 每次 store 全量重建（→ 增量更新已完成，add/remove/update 不重建，阈值20次或显式 force_rebuild）
-- word_overlap 阈值固定为 2（→ 可配置）
 - 旧数据（agent_id="test"）跨 agent 可被召回（legacy 数据问题）
-- LLM extraction 备选路径（worker.py）已失效但保留代码
-- 词表维护：systemd timer 已配置，每日 03:00 调 LLM 对比 tokenizer 结果，候选增删词到日志
-- 测试框架：node --test，25 个测试（lark_tok/rule_extractor/BM25Index/GraphStore/plugin smoke），`npm test` 运行
+- 词表维护 systemd timer 待配置
+- agent-to-agent 记忆传播（child 结果传播到 parent）
 
 ---
 
@@ -201,13 +235,10 @@ store(content)
 | 依赖 | 版本 | 用途 | 安装 |
 |------|------|------|------|
 | Python | 3.12 | 运行环境 | - |
-| fastapi | latest | HTTP 服务 | `pip install fastapi uvicorn` |
-| httpx | latest | HTTP 客户端 | `pip install httpx` |
-| rank-bm25 | latest | BM25 算法 | `pip install rank-bm25` |
-| lark | 1.3.1 | 中文分词 | `pip install lark` |
+| lancedb | 0.30+ | 本地向量 + FTS | `pip install lancedb` |
+| jieba | latest | 中文分词 | `pip install jieba` |
 | networkx | latest | 图引擎 | `pip install networkx` |
-| Ollama | - | 向量生成 (bge-m3) | Win11 本地运行 |
-| Qdrant | 1.17+ | 向量数据库 | Win11 本地运行 |
+| Ollama | - | 向量生成 (bge-m3) + LLM extraction | WSL2 本地运行 |
 
 ---
 

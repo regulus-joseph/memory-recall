@@ -2,81 +2,84 @@
 
 > 适用环境：Win11 + WSL2 (Ubuntu)
 > 目标用户：个人开发者
+> 当前版本：v2.5 (LanceDB + worker 架构)
 
 ---
 
 ## 环境要求
 
 - **WSL2** + Ubuntu（systemd 已启用）
-- **Python 3.12+**
-- **Ollama**（Win11 本地运行）
-  - bge-m3（embedding）
-  - qwen3.5:9b（可选，当前用规则提取）
-- **Qdrant**（Win11 本地运行，端口 6333）
+- **Python 3.12**
+- **Ollama**（WSL2 内运行）
+  - `bge-m3`（embedding）
+  - `qwen2.5:7b`（LLM extraction）
 - **Node.js**（openclaw gateway）
+
+**无外部依赖**：Qdrant 已移除，所有数据存在本地 LanceDB 文件。
 
 ---
 
 ## 依赖安装
 
+### 1. Ollama 模型
+
 ```bash
-# 1. Python 依赖
-pip install fastapi uvicorn httpx rank-bm25 lark networkx
-
-# 2. Ollama 模型（Win11 PowerShell）
 ollama pull bge-m3
-ollama pull qwen3.5:9b  # 可选
+ollama pull qwen2.5:7b
+```
 
-# 3. Qdrant（Win11）
-# 下载 https://github.com/qdrant/qdrant/releases
-# 解压后运行 qdrant.exe --storage . --port 6333
+### 2. Python venv
+
+```bash
+# 如果已有 ~/.memory-recall-venv，跳过此步
+python3.12 -m venv ~/.memory-recall-venv
+~/.memory-recall-venv/bin/pip install lancedb jieba networkx
+```
+
+验证：
+```bash
+~/.memory-recall-venv/bin/python -c "import lancedb, jieba, networkx; print('all ok')"
 ```
 
 ---
 
-## 安装步骤
-
-### 1. 安装 Python 依赖
+## 插件安装
 
 ```bash
 cd ~/projects/memory-recall
-pip install fastapi uvicorn httpx rank-bm25 lark networkx
+openclaw plugins install --link . --dangerously-force-unsafe-install
 ```
 
-### 2. 配置 systemd service
+---
 
-```bash
-mkdir -p ~/.config/systemd/user
+## OpenClaw 配置
 
-# 写入 service 文件
-cat > ~/.config/systemd/user/memory-recall.service << 'EOF'
-[Unit]
-Description=Memory Recall Server
-After=network.target
+编辑 `~/.openclaw/openclaw.json`，在 `plugins` 区块添加：
 
-[Service]
-Type=simple
-ExecStart=/home/marlon-wei/bin/python3 /home/marlon-wei/projects/memory-recall/start.sh
-Restart=always
-RestartSec=3
-Environment="PATH=/home/marlon-wei/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-StandardOutput=append:/tmp/memory-recall.log
-StandardError=append:/tmp/memory-recall.log
-
-[Install]
-WantedBy=default.target
-EOF
-
-# 启用
-systemctl --user daemon-reload
-systemctl --user enable memory-recall.service
+```json
+{
+  "plugins": {
+    "allow": ["memory-recall", "minimax", "browser", "acpx"],
+    "entries": {
+      "memory-recall": {
+        "enabled": true,
+        "config": {
+          "autoStore": true,
+          "autoRecall": true,
+          "autoRecallMaxItems": 3,
+          "autoRecallMaxChars": 600,
+          "decayEnabled": true,
+          "decayIntervalHours": 24
+        }
+      }
+    }
+  }
+}
 ```
 
-### 3. 启动
-
+重启：
 ```bash
-systemctl --user start memory-recall.service
-systemctl --user status memory-recall.service
+openclaw gateway restart
 ```
 
 ---
@@ -85,55 +88,31 @@ systemctl --user status memory-recall.service
 
 ### 启停
 
-```bash
-# 启动
-systemctl --user start memory-recall.service
-
-# 停止
-systemctl --user stop memory-recall.service
-
-# 重启
-systemctl --user restart memory-recall.service
-
-# 查看状态
-systemctl --user status memory-recall.service
-
-# 开机自启（默认已 enabled）
-systemctl --user enable memory-recall.service
-```
-
-### 日志
+Worker 由 TS plugin 通过 `child_process.spawn` 管理生命周期，无需单独启停。
 
 ```bash
-# 实时日志
-tail -f /tmp/memory-recall.log
+# 重启 gateway（即重启 worker）
+openclaw gateway restart
 
-# 最近 50 行
-journalctl --user -u memory-recall.service -n 50
-
-# 错误日志
-journalctl --user -u memory-recall.service -p err -n 20
+# 查看 worker 日志
+openclaw logs 2>&1 | grep memory-recall
 ```
+
+### 衰减引擎日志
+
+```bash
+openclaw logs 2>&1 | grep "decay\|compactor"
+```
+
+首次 decay cycle 可能超时（worker 冷启动），后续正常运行。
 
 ### 数据目录
 
 ```
-~/.memory-recall/
-└── data/
-    ├── memory_graph.json   # 图数据（边：session/cooccur/category_overlap/word_overlap）
-    ├── bm25_index.json    # BM25 索引
-    └── extraction_queue.jsonl  # 待处理队列（当前为空）
-```
-
-### 手动重启服务
-
-```bash
-# 杀掉当前进程
-kill $(ps aux | grep "server.py" | grep -v grep | awk '{print $2}')
-
-# 启动
-cd ~/projects/memory-recall
-python src/server.py
+~/.memory-recall/data/
+└── {agent_id}/
+    ├── memories.lance/    # LanceDB 表（per-agent）
+    └── graph.json         # NetworkX 图（per-agent）
 ```
 
 ---
@@ -141,30 +120,30 @@ python src/server.py
 ## 快速测试
 
 ```bash
-# 健康检查
-curl http://localhost:8765/health
+# 查看插件加载
+openclaw logs 2>&1 | grep "memory-recall"
 
-# 存一条记忆
-curl -s http://localhost:8765/store -X POST \
-  -H "Content-Type: application/json" \
-  -d '{"content":"我住在深圳","agent_id":"test"}'
+# 手动测试 worker 健康
+~/.memory-recall-venv/bin/python -c "
+import sys; sys.path.insert(0, '/home/marlon-wei/projects/memory-recall/src')
+import asyncio, worker
+print(asyncio.run(worker.cmd_health()))
+"
 
-# 召回
-curl -s http://localhost:8765/recall -X POST \
-  -H "Content-Type: application/json" \
-  -d '{"query":"住在哪","agent_id":"test","max_results":3}'
+# 查看 LanceDB 表
+~/.memory-recall-venv/bin/python -c "
+import lancedb
+db = lancedb.connect('/home/marlon-wei/.memory-recall/data/main')
+tbl = db.open_table('memories')
+print(f'Rows: {tbl.count_rows()}')
+"
 
-# 统计
-curl http://localhost:8765/stats
-
-# 图统计
-python3 -c "
-import json
-g = json.load(open('/home/marlon-wei/.memory-recall/data/memory_graph.json'))
-from collections import Counter
-rels = Counter(e.get('relation') for e in g['edges'])
-print('Edge types:', dict(rels))
-print('Nodes:', len(g['nodes']))
+# 查看 NetworkX 图
+~/.memory-recall-venv/bin/python -c "
+import json, networkx as nx
+with open('/home/marlon-wei/.memory-recall/data/main/graph.json') as f:
+    g = nx.node_link_graph(json.load(f))
+print(f'Nodes: {g.number_of_nodes()}, Edges: {g.number_of_edges()}')
 "
 ```
 
@@ -176,69 +155,52 @@ print('Nodes:', len(g['nodes']))
 
 ```bash
 # 1. 查看详细日志
-journalctl --user -u memory-recall.service -n 30
+openclaw logs 2>&1 | grep memory-recall | tail -20
 
-# 2. 手动运行看报错
+# 2. 手动运行 worker 看报错
 cd ~/projects/memory-recall
-python src/server.py
+~/.memory-recall-venv/bin/python src/worker.py
 
-# 3. 常见问题
-# - Port 8765 被占用: kill 占用进程
-# - Qdrant 未启动: Win11 启动 qdrant.exe
-# - Ollama 未启动: ollama serve
+# 3. 检查 Python 依赖
+~/.memory-recall-venv/bin/python -c "import lancedb, jieba, networkx; print('deps ok')"
 ```
 
 ### 向量检索返回空
 
 ```bash
 # 检查 Ollama
-curl http://localhost:11434/api/tags
+curl -s http://localhost:11434/api/tags | head -20
 
 # 测试 embedding
-curl -X POST http://localhost:11434/api/embeddings \
+curl -s -X POST http://localhost:11434/api/embeddings \
   -d '{"model":"bge-m3","prompt":"hello"}'
 ```
 
-### 分词不工作
+### decay cycle 超时
+
+首次运行可能超时（worker 冷启动初始化慢）。这是预期行为，后续运行正常。
 
 ```bash
-# 测试 lark
-python3 -c "from lark import Lark; print('OK')"
-
-# 测试分词
-cd ~/projects/memory-recall
-python3 src/lark_tok.py
+# 手动触发一次看详细日志
+openclaw gateway restart
+sleep 5 && openclaw logs 2>&1 | grep "decay\|compact"
 ```
 
 ---
 
-## 词表自动维护
+## 环境变量
 
-每天凌晨 3:00 自动运行，通过 systemd timer 触发。
+| 变量 | 说明 | 默认值 |
+|------|------|-------|
+| `PYTHON_BIN` | Worker Python 路径 | `~/.memory-recall-venv/bin/python` |
+| `EMBEDDING_URL` | Ollama embedding API | `http://localhost:11434/api/embeddings` |
+| `EMBEDDING_MODEL` | Embedding 模型 | `bge-m3` |
+| `OLLAMA_URL` | Ollama generate API | `http://localhost:11434` |
+| `LLM_MODEL` | Extraction LLM | `qwen2.5:7b` |
 
-**逻辑：**
-1. 遍历所有记忆（Qdrant scroll）
-2. 每条记忆用当前 tokenizer 提取词
-3. 调 Ollama LLM 重新分词
-4. 对比：LLM 有但字典无 → 候选新增；LLM 无但字典有 → 候选删除
-5. 输出到 `/tmp/memory-recall-dict.log`
-
-**手动触发：**
+覆盖示例：
 ```bash
-# 预览模式（不修改文件）
-python3 ~/projects/memory-recall/src/dict_maintenance.py --dry-run
-
-# 完整运行（调 LLM 检查）
-python3 ~/projects/memory-recall/src/dict_maintenance.py --limit 20
-
-# 只检查不用 LLM
-python3 ~/projects/memory-recall/src/dict_maintenance.py --check
-```
-
-**启用/查看 timer：**
-```bash
-systemctl --user enable memory-recall-dict.timer
-systemctl --user start memory-recall-dict.timer
-systemctl --user list-timers
-journalctl --user -u memory-recall-dict.service -n 20
+# 在 openclaw 启动前设置
+export PYTHON_BIN=/custom/path/bin/python
+openclaw gateway restart
 ```

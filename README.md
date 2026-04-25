@@ -1,37 +1,45 @@
 # Memory Recall Plugin
 
-> L1/L2/L3 cascade memory recall for OpenClaw: vector (Qdrant) + BM25 + graph expansion (networkx)
+> L1/L2/L3 cascade memory recall for OpenClaw: per-agent LanceDB (vector + FTS) + NetworkX graph expansion. Async LLM extraction, Weibull decay, progressive compaction.
 
 ## 版本历史
 
 | 版本 | 日期 | 更新内容 |
 |-----|------|---------|
 | 0.1.0 | 2026-04-22 | 初始版本: Qdrant存储 + Ollama bge-m3 embedding + recall_memories工具 |
-| 0.2.0 | 2026-04-22 | 添加before_agent_start hook自动注入; 修复tools.byProvider配置 |
-| **0.3.0** | 2026-04-24 | **Phase 1: TS plugin + Python server 架构；async LLM extraction；MLP 6-category；enhanced embedding；移除 blocking warmup** |
+| 0.2.0 | 2026-04-22 | 添加before_agent_start hook自动注入 |
+| 0.3.0 | 2026-04-24 | Phase 1: TS plugin + Python server 架构；async LLM extraction；MLP 6-category |
+| **0.4.0** | 2026-04-25 | **v2.5: LanceDB迁移；worker架构（stdio JSON-RPC）；Weibull decay；Compactor聚类合并；Tier保护** |
 
 ## 架构
 
 ```
-OpenClaw Gateway
-    └── memory-recall (TS plugin, index.ts)
+OpenClaw Gateway (TS plugin)
+    └── memory-recall (index.ts)
             ├── 4 tools: recall_memories / store_memory / forget_memory / update_memory
             ├── 3 hooks: message_received / agent_end / before_prompt_build
-            └── HTTP → http://localhost:8765 (Python server)
-                        ├── L1: Qdrant vector search
-                        ├── L2: BM25 (jieba-free, bigram fallback)
-                        ├── L3: graphify (networkx) graph expansion
-                        ├── LLM extraction: 6W + MLP category (qwen3.5:9b, async)
-                        ├── BM25 index: ~/.memory-recall/data/bm25_index.json
-                        └── Graph: ~/.memory-recall/data/memory_graph.json
+            ├── registerService: decay timer (gateway托管，每24h)
+            └── child_process.spawn → Python worker (stdio JSON-RPC)
+                              ├── L1: LanceDB vector search (per-agent)
+                              ├── L2: LanceDB FTS (jieba tokenize, per-agent)
+                              ├── L3: NetworkX graph expansion (per-agent)
+                              ├── LLM extraction: 6w + category + confidence + temporal_type (async)
+                              ├── Decay: Weibull composite score (recency/frequency/intrinsic)
+                              ├── Compactor: cosine similarity clustering (merge → max importance)
+                              ├── Tier protection: core memories (importance ≥ 0.7) immune
+                              ├── Graph edges: same_when / same_where (multi-relation)
+                              └── LanceDB data: ~/.memory-recall/data/{agent_id}/memories.lance
 ```
+
+**无需外部依赖**：Qdrant 已移除，所有数据存在本地 LanceDB 文件。
 
 ## 前置依赖
 
-### 1. Qdrant
+### 1. Python venv（已有则跳过）
 
 ```bash
-docker run -d --name qdrant -p 6333:6333 -p 6334:6334 qdrant/qdrant
+python3.12 -m venv ~/.memory-recall-venv
+~/.memory-recall-venv/bin/pip install lancedb jieba networkx
 ```
 
 ### 2. Ollama
@@ -40,166 +48,161 @@ docker run -d --name qdrant -p 6333:6333 -p 6334:6334 qdrant/qdrant
 # bge-m3 for embeddings
 ollama pull bge-m3
 
-# qwen3.5:9b for LLM extraction (6W + MLP category)
-ollama pull qwen3.5:9b
+# qwen2.5:7b for LLM extraction (6w + category + confidence)
+ollama pull qwen2.5:7b
 ```
 
-### 3. Python 环境
+## 安装
+
+### 1. 插件安装
 
 ```bash
 cd ~/projects/memory-recall
-pip install -r requirements.txt
-
-# 启动 Python server
-python -m src.server
-# 或者后台运行:
-# nohup python -m src.server > ~/.memory-recall/server.log 2>&1 &
+openclaw plugins install --link . --dangerously-force-unsafe-install
 ```
 
-### 4. Node 环境
+### 2. OpenClaw 配置
 
-```bash
-cd ~/projects/memory-recall
-npm install
-```
-
-### 5. OpenClaw 插件安装
-
-```bash
-cd ~/projects/memory-recall
-openclaw plugins install . --dangerously-force-unsafe-install
-```
-
-### 6. OpenClaw 配置
-
-编辑 `~/.openclaw/openclaw.json`，确保 `plugins` 区块包含以下内容：
+编辑 `~/.openclaw/openclaw.json`：
 
 ```json
 {
   "plugins": {
-    "allow": [
-      "memory-recall",
-      "minimax",
-      "browser",
-      "acpx"
-    ],
+    "allow": ["memory-recall", "minimax", "browser", "acpx"],
     "entries": {
       "memory-recall": {
         "enabled": true,
         "config": {
-          "serverUrl": "http://localhost:8765",
           "autoStore": true,
           "autoRecall": true,
           "autoRecallMaxItems": 3,
-          "autoRecallMaxChars": 600
+          "autoRecallMaxChars": 600,
+          "decayEnabled": true,
+          "decayIntervalHours": 24
         }
-      },
-      "memory-core": {
-        "enabled": false
-      },
-      "memory-lancedb": {
-        "enabled": false
       }
-    },
-    "slots": {
-      "memory": "memory-recall"
     }
   }
 }
 ```
 
-> 注意：`plugins.allow` 必须包含 `memory-recall`，否则 plugin 会被忽略。
-> `slots.memory` 独占后，`memory-core` 和 `memory-lancedb` 会自动禁用。
+### 3. 重启验证
 
-重启 gateway：
 ```bash
 openclaw gateway restart
-```
-
-验证加载：
-```bash
-openclaw plugins list | grep memory-recall
-openclaw plugins doctor 2>&1 | grep memory-recall
+openclaw logs 2>&1 | grep memory-recall
 ```
 
 ## 配置
-```
 
 | 配置 | 说明 | 默认值 |
-|-----|------|-------|
-| `serverUrl` | Python server 地址 | `http://localhost:8765` |
-| `autoStore` | 自动存储消息 | `true` |
+|------|------|-------|
+| `autoStore` | 自动存储消息到记忆 | `true` |
 | `autoRecall` | 自动注入记忆到 prompt | `true` |
 | `autoRecallMaxItems` | 每次注入最大条数 | `3` |
 | `autoRecallMaxChars` | 每次注入最大字符数 | `600` |
+| `decayEnabled` | 启用衰减引擎 | `true` |
+| `decayIntervalHours` | 衰减周期（小时） | `24` |
 
-## 环境变量
+### 环境变量
 
 | 变量 | 说明 | 默认值 |
 |------|------|-------|
-| `QDRANT_HOST` | Qdrant 地址 | `localhost` |
-| `QDRANT_PORT` | Qdrant 端口 | `6333` |
+| `PYTHON_BIN` | Worker Python 路径 | `~/.memory-recall-venv/bin/python` |
 | `EMBEDDING_URL` | Ollama embedding API | `http://localhost:11434/api/embeddings` |
 | `EMBEDDING_MODEL` | Embedding 模型 | `bge-m3` |
-| `OLLAMA_URL` | Ollama generate API | `http://localhost:11434/api/generate` |
-| `LLM_MODEL` | Extraction LLM 模型 | `qwen3.5:9b` |
-| `MEMORY_RECALL_SERVER` | Python server（TS 端） | `http://localhost:8765` |
+| `OLLAMA_URL` | Ollama generate API | `http://localhost:11434` |
+| `LLM_MODEL` | Extraction LLM | `qwen2.5:7b` |
 
 ## 工具
 
 | 工具 | 说明 |
 |------|------|
 | `recall_memories` | L1/L2/L3 混合检索，参数: query, max_results, min_score |
-| `store_memory` | 存储记忆，自动 LLM 提取 6W + category |
-| `forget_memory` | 按 ID 删除记忆 |
+| `store_memory` | 存储记忆，自动 LLM 提取 6w + category + confidence + temporal_type |
+| `forget_memory` | 按 ID 删除记忆（core 记忆除外） |
 | `update_memory` | 更新记忆内容，自动重新提取 |
 
-## Server API
+## Schema v2.5（21 字段）
 
-Python server 暴露以下 HTTP 端点:
+| 字段 | 说明 |
+|------|------|
+| `id` | 唯一标识 |
+| `content` | 原始内容 |
+| `agent_id` | 所属 agent |
+| `conversation_id` | 所属会话 |
+| `category` | LLM 提取：6-category MLP |
+| `who` | LLM 提取：参与者 |
+| `when` | LLM 提取：时间 |
+| `where` | LLM 提取：地点 |
+| `why` | LLM 提取：目的 |
+| `how` | LLM 提取：方式 |
+| `summary` | LLM 提取：摘要 |
+| `importance` | 重要性（0~1），core ≥ 0.7 |
+| `confidence` | LLM 置信度（0~1） |
+| `temporal_type` | 时间类型（recurring/one-time/ongoing） |
+| `access_count` | 访问次数 |
+| `last_accessed_at` | 上次访问时间 |
+| `compaction_rounds` | 合并次数 |
+| `last_compacted_at` | 上次合并时间 |
+| `original_source_count` | 合并来源数 |
+| `created_at` | 创建时间 |
+| `updated_at` | 更新时间 |
 
-| 端点 | 方法 | 说明 |
-|------|------|------|
-| `/health` | GET | 健康检查 |
-| `/stats` | GET | 统计信息 |
-| `/recall` | POST | L1/L2/L3 cascade recall |
-| `/store` | POST | 存储记忆 + LLM 提取 |
-| `/forget` | POST | 删除记忆 |
-| `/update` | POST | 更新记忆 |
+## 衰减引擎
+
+`composite = 0.4×recency + 0.3×frequency + 0.3×intrinsic`
+
+- **temporal_type** 影响半衰期：recurring ×3，ongoing ×1，one-time ×1
+- **decay floor** = 0.9（不会低于此值）
+- **Tier 保护**：importance ≥ 0.7 的 core 记忆免疫删除和合并
+- decay timer 通过 `registerService` 由 gateway 托管，每 24h 执行一次
+
+## Compactor（聚类合并）
+
+- 触发：decay score ≤ 0.3 且 14 天未合并
+- 逻辑：cosine similarity ≥ 0.88 的记忆聚类合并
+- 合并规则：内容去重行，最大 importance，plurality category
+- 限制：最多 4 轮，防止过度合并
+
+## 数据目录
+
+```
+~/.memory-recall/data/
+└── {agent_id}/
+    ├── memories.lance/     # LanceDB 表（vector + FTS）
+    └── graph.json         # NetworkX 图（session/cooccur/category_overlap/same_when/same_where）
+```
 
 ## 调试
 
 ```bash
-# Python server 日志
-tail -f ~/.memory-recall/server.log
-
-# 重启 Python server
-pkill -f "python -m src.server" && python -m src.server &
-
 # 查看插件日志
 openclaw logs 2>&1 | grep memory-recall
 
-# Qdrant API 测试
-curl http://localhost:6333/collections/memory_recall
+# 测试 worker 健康
+cd ~/projects/memory-recall
+~/.memory-recall-venv/bin/python -c "
+import sys; sys.path.insert(0, 'src')
+from worker import cmd_health
+import asyncio
+print(asyncio.run(cmd_health()))
+"
 
-# Python server 直接测试
-curl -X POST http://localhost:8765/health
-curl -X POST http://localhost:8765/stats
-curl -X POST http://localhost:8765/store -H "Content-Type: application/json" -d '{"content": "测试记忆", "agent_id": "test"}'
-curl -X POST http://localhost:8765/recall -H "Content-Type: application/json" -d '{"query": "测试", "max_results": 5}'
+# 强制运行 decay cycle（手动触发）
+# 通过 restart gateway 让 registerService 重新 start
+openclaw gateway restart
+
+# 查看 LanceDB 数据
+~/.memory-recall-venv/bin/python -c "
+import lancedb
+db = lancedb.connect('~/.memory-recall/data/main')
+print(db.open_table('memories').head())
+"
 ```
-
-## 数据文件
-
-| 文件 | 说明 |
-|------|------|
-| `~/.memory-recall/data/bm25_index.json` | BM25 倒排索引 |
-| `~/.memory-recall/data/memory_graph.json` | 记忆图谱 |
 
 ## 已知问题
 
-- LLM extraction 使用 qwen3.5:9b，如果 ollama 未安装会自动 fallback 到 regex 规则
-- BM25 index 在首次使用或更新后自动重建（小 corpus 时 BM25 分数接近 0，随数据量增加改善）
-- Graph expansion 使用 networkx BFS，如果 networkx 未安装则降级为 cooccurrence 计数
-- `register` 必须是同步函数（OpenClaw plugin 规范要求）
-- plugin 安装需要 `--dangerously-force-unsafe-install`（因为使用了 `process.env` + `fetch`）
+- 插件安装需要 `--dangerously-force-unsafe-install`（因为 worker 架构需要 `child_process.spawn`）
+- decay 首次运行可能超时（worker 冷启动），后续正常运行
+- LanceDB FTS 需要先调用 `create_fts_index("tokens")` 初始化（自动完成）
