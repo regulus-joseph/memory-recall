@@ -1,6 +1,12 @@
 /**
  * Memory Recall - OpenClaw Plugin
  * Architecture: TS plugin → Python worker (stdio JSON-RPC) → per-agent LanceDB + NetworkX Graph
+ *
+ * Design: recall is non-blocking via session-level cache.
+ * - message_received → fire-and-forget recall → update cache
+ * - before_prompt_build → read cache (synchronous, <1ms) → inject
+ *
+ * Store (agent_end) is awaited since storage must complete before session ends.
  */
 import { spawn } from "node:child_process";
 import { createRequire } from "node:module";
@@ -22,6 +28,16 @@ function parsePluginConfig(value: unknown): MemoryRecallConfig {
 }
 
 const PYTHON_BIN = process.env.PYTHON_BIN || "/home/marlon-wei/.memory-recall-venv/bin/python";
+
+interface RecallCache {
+  query:      string;
+  results:    Array<{ content: unknown; relevance_score: unknown; category: unknown }>;
+  expire:     number;
+}
+
+const RECALL_CACHE_TTL_MS = 30_000;
+
+const recallCache = new Map<string, RecallCache>();
 
 class WorkerClient {
   private proc: ReturnType<typeof spawn>;
@@ -425,15 +441,31 @@ const memoryRecallPlugin = {
       api.registerHook("message_received", async (event) => {
         const text = extractText(event.content);
         if (!text || text.length < 10) return;
-        try {
-          await worker.store({
-            content: text,
-            agent_id: event.from,
-            conversation_id: event.conversationId,
-            metadata: { role: "user", sender: event.from, channel_id: event.channelId },
-          });
-        } catch (err) {
+
+        const sessionKey = event.sessionKey ?? event.from ?? "default";
+        const maxResults = config.autoRecallMaxItems ?? 3;
+
+        worker.store({
+          content: text,
+          agent_id: event.from,
+          conversation_id: event.conversationId,
+          metadata: { role: "user", sender: event.from, channel_id: event.channelId },
+        }).catch(err => {
           api.logger.warn(`[memory-recall] auto-store failed: ${String(err)}`);
+        });
+
+        if (autoRecall) {
+          worker.recall({ query: text, max_results: maxResults })
+            .then(data => {
+              if (data && (data.results as unknown[]).length > 0) {
+                recallCache.set(sessionKey, {
+                  query: text,
+                  results: data.results as RecallCache["results"],
+                  expire: Date.now() + RECALL_CACHE_TTL_MS,
+                });
+              }
+            })
+            .catch(() => {});
         }
       }, { name: "memory-recall-autostore" });
 
@@ -458,40 +490,35 @@ const memoryRecallPlugin = {
     }
 
     if (autoRecall) {
-      api.on("before_prompt_build", async (params: { sessionMessages?: string[]; userMessage?: string }) => {
+      api.on("before_prompt_build", async (params: { sessionMessages?: string[]; userMessage?: string }, ctx) => {
         const userMessage = params?.userMessage || "";
         if (!userMessage || userMessage.length < 3) return { prependContext: "" };
 
-        try {
-          const data = await worker.recall({
-            query: userMessage,
-            max_results: config.autoRecallMaxItems ?? 3,
-          });
+        const sessionKey = ctx?.sessionKey ?? userMessage.slice(0, 80);
+        const cached = recallCache.get(sessionKey);
 
-          if (!data.results.length) return { prependContext: "" };
-
-          const maxChars = config.autoRecallMaxChars ?? 600;
-          const selected: string[] = [];
-          let totalChars = 0;
-          for (const r of data.results) {
-            if (totalChars + (r.content as string).length > maxChars) break;
-            const cat = r.category || "memory";
-            const score = ((r.relevance_score as number ?? 0) * 100).toFixed(0);
-            selected.push(`[${cat}][${score}%] ${r.content}`);
-            totalChars += (r.content as string).length + 30;
-          }
-
-          if (!selected.length) return { prependContext: "" };
-
-          api.logger.info(`[memory-recall] injecting ${selected.length} memories (${totalChars} chars)`);
-
-          return {
-            prependContext: `<relevant-memories>\n${selected.join("\n")}\n</relevant-memories>`,
-          };
-        } catch (err) {
-          api.logger.warn(`[memory-recall] auto-recall failed: ${String(err)}`);
+        if (!cached || Date.now() > cached.expire) {
           return { prependContext: "" };
         }
+
+        const maxChars = config.autoRecallMaxChars ?? 600;
+        const selected: string[] = [];
+        let totalChars = 0;
+        for (const r of cached.results) {
+          if (totalChars + (r.content as string).length > maxChars) break;
+          const cat = r.category || "memory";
+          const score = ((r.relevance_score as number ?? 0) * 100).toFixed(0);
+          selected.push(`[${cat}][${score}%] ${r.content}`);
+          totalChars += (r.content as string).length + 30;
+        }
+
+        if (!selected.length) return { prependContext: "" };
+
+        api.logger.info(`[memory-recall] cache hit: injecting ${selected.length} memories (${totalChars} chars)`);
+
+        return {
+          prependContext: `<relevant-memories>\n${selected.join("\n")}\n</relevant-memories>`,
+        };
       }, { name: "memory-recall-autorecall" });
     }
 

@@ -32,11 +32,13 @@ import httpx
 import lancedb
 import pyarrow as pa
 
-sys.path.insert(0, str(Path(__file__).parent.parent))
+_shared = Path.home() / "projects" / "shared-lib"
+sys.path.insert(0, str(_shared))
 
 from src.core.graph_store import GraphStore
 from src.rule_extractor import extract as rule_extract
 from src.lark_tok import tokenize as jieba_tokenize
+import shared_lib as _sl
 
 logging.basicConfig(
     level=logging.INFO,
@@ -50,11 +52,11 @@ APP_DIR.mkdir(exist_ok=True)
 DATA_DIR = APP_DIR / "data"
 DATA_DIR.mkdir(exist_ok=True)
 
-EMBED_URL = os.getenv("EMBEDDING_URL", "http://localhost:11434/api/embeddings")
-EMBED_MODEL = os.getenv("EMBEDDING_MODEL", "bge-m3")
-EMBED_DIM = int(os.getenv("EMBED_DIM", "1024"))
-LLM_URL = os.getenv("LLM_URL", "http://localhost:11434/api/chat")
-LLM_MODEL = os.getenv("LLM_MODEL", "")
+EMBED_URL   = f"{_sl.BASE_URL}/api/embeddings"
+EMBED_MODEL = _sl.EMBED_MODEL
+EMBED_DIM   = _sl.EMBED_DIM
+LLM_URL     = f"{_sl.BASE_URL}/api/chat"
+LLM_MODEL   = _sl.LLM_MODEL
 
 _lance_instances: dict[str, "lancedb.table.LanceTable"] = {}
 _graph_instances: dict[str, GraphStore] = {}

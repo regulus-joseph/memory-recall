@@ -13,12 +13,14 @@ import os
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path.home() / "projects" / "shared-lib"))
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import httpx
+import shared_lib as _sl
 
-OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434/api/generate")
-OLLAMA_MODEL = os.getenv("LLM_MODEL", "qwen3.5:9b")
+OLLAMA_URL   = f"{_sl.BASE_URL}/api/generate"
+OLLAMA_MODEL = _sl.LLM_MODEL
 
 _USER_DICT_PATH = Path(__file__).parent / "user_dict.txt"
 
