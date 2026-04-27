@@ -44,23 +44,23 @@ class WorkerClient {
   private pending: Map<number, { resolve: (v: unknown) => void; reject: (e: Error) => void }> = new Map();
   private nextId = 1;
   private ready = false;
+  private dead = false;
   private readyPromise: Promise<void>;
   private stderr = "";
+  private pythonBin: string;
+  private workerPath: string;
+  private cwd: string;
 
-  constructor(pythonBin: string, workerPath: string) {
+  constructor(pythonBin: string, workerPath: string, cwd: string) {
+    this.pythonBin = pythonBin;
+    this.workerPath = workerPath;
+    this.cwd = cwd;
     this.proc = spawn(pythonBin, [workerPath], {
       stdio: ["pipe", "pipe", "pipe"],
       env: { ...process.env, PYTHONUNBUFFERED: "1" },
+      cwd,
     });
-
-    this.proc.stderr?.on("data", (d: Buffer) => {
-      this.stderr += d.toString();
-    });
-
-    this.proc.stdout?.on("data", (d: Buffer) => {
-      this.handleLine(d.toString());
-    });
-
+    this._setupProcessHandlers();
     this.readyPromise = new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         reject(new Error(`worker init timeout, stderr: ${this.stderr.slice(0, 200)}`));
@@ -72,13 +72,82 @@ class WorkerClient {
       this.onceReady = () => {
         clearTimeout(timer);
         this.ready = true;
+        this.dead = false;
         resolve();
       };
     });
+    this.initPromise = this.readyPromise;
+    this._ping().catch(() => {});
   }
 
   private onceReady: () => void = () => {};
-  private initPromise: Promise<void> = this.readyPromise;
+  private initPromise: Promise<void>;
+
+  private _ping(): Promise<void> {
+    return new Promise((resolve) => {
+      const id = this.nextId++;
+      this.pending.set(id, {
+        resolve: (v: unknown) => resolve(),
+        reject: () => resolve(),
+      });
+      const req = JSON.stringify({ jsonrpc: "2.0", id, method: "ping", params: {} }) + "\n";
+      this.proc.stdin?.write(req);
+      setTimeout(() => {
+        this.pending.delete(id);
+        resolve();
+      }, 5000);
+    });
+  }
+
+  private _setupProcessHandlers() {
+    this.proc.stderr?.on("data", (d: Buffer) => {
+      this.stderr += d.toString();
+    });
+
+    this.proc.stdin?.on("error", (err: NodeJS.ErrnoException) => {
+      if (err.code === "EPIPE" || err.code === "ECONNRESET") {
+        console.warn("[memory-recall] worker stdin EPIPE (process died), will restart on next call");
+        this.ready = false;
+        this.dead = true;
+      }
+    });
+
+    this.proc.stdout?.on("data", (d: Buffer) => {
+      this.handleLine(d.toString());
+    });
+  }
+
+  private async _restart(): Promise<void> {
+    if (!this.dead) return;
+    this.proc.kill();
+    this.pending.clear();
+    this.stderr = "";
+    this.nextId = 1;
+    this.ready = false;
+    this.proc = spawn(this.pythonBin, [this.workerPath], {
+      stdio: ["pipe", "pipe", "pipe"],
+      env: { ...process.env, PYTHONUNBUFFERED: "1" },
+      cwd: this.cwd,
+    });
+    this._setupProcessHandlers();
+    this.readyPromise = new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        reject(new Error(`worker restart timeout, stderr: ${this.stderr.slice(0, 200)}`));
+      }, 10000);
+      this.proc.on("error", (e) => {
+        clearTimeout(timer);
+        reject(e);
+      });
+      this.onceReady = () => {
+        clearTimeout(timer);
+        this.ready = true;
+        this.dead = false;
+        resolve();
+      };
+    });
+    this.initPromise = this.readyPromise;
+    this._ping().catch(() => {});
+  }
 
   private handleLine(data: string) {
     const lines = data.split("\n");
@@ -105,6 +174,7 @@ class WorkerClient {
   }
 
   async call<T = unknown>(method: string, params: Record<string, unknown> = {}): Promise<T> {
+    if (this.dead) await this._restart();
     await this.initPromise;
     return new Promise((resolve, reject) => {
       const id = this.nextId++;
@@ -243,7 +313,7 @@ const memoryRecallPlugin = {
 
     let worker: WorkerClient;
     try {
-      worker = new WorkerClient(pythonBin, workerPath);
+      worker = new WorkerClient(pythonBin, workerPath, pluginDir.replace(/\/src$/, ""));
       worker.health().catch((e) => {
         api.logger.error(`[memory-recall] worker failed to start: ${e.message}`);
       });

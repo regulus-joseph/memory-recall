@@ -32,8 +32,13 @@ import httpx
 import lancedb
 import pyarrow as pa
 
+_project_root = Path(__file__).resolve().parent.parent
+if str(_project_root) not in sys.path:
+    sys.path.insert(0, str(_project_root))
+
 _shared = Path.home() / "projects" / "shared-lib"
-sys.path.insert(0, str(_shared))
+if str(_shared) not in sys.path:
+    sys.path.insert(0, str(_shared))
 
 from src.core.graph_store import GraphStore
 from src.rule_extractor import extract as rule_extract
@@ -1245,6 +1250,10 @@ async def cmd_health(params: dict) -> dict:
     return {"status": "ok"}
 
 
+async def cmd_ping(params: dict) -> dict:
+    return {"pong": True}
+
+
 METHODS = {
     "store": cmd_store,
     "recall": cmd_recall,
@@ -1255,6 +1264,7 @@ METHODS = {
     "graph_rebuild": cmd_graph_rebuild,
     "decay_scan": cmd_decay_scan,
     "health": cmd_health,
+    "ping": cmd_ping,
 }
 
 
