@@ -198,7 +198,10 @@ def _migrate_schema(table: "lancedb.table.LanceTable") -> None:
         schema_names = {f.name for f in table.schema()}
     except Exception:
         return
-    needed = {"compaction_rounds", "last_compacted_at", "original_source_count"}
+    needed = {
+        "compaction_rounds", "last_compacted_at", "original_source_count",
+        "who", "when", "where", "why", "how", "summary", "confidence",
+    }
     missing = needed - schema_names
     if not missing:
         return
@@ -210,6 +213,20 @@ def _migrate_schema(table: "lancedb.table.LanceTable") -> None:
                 table.add_columns([pa.field("last_compacted_at", pa.float64())])
             elif col == "original_source_count":
                 table.add_columns([pa.field("original_source_count", pa.int32())])
+            elif col == "who":
+                table.add_columns([pa.field("who", pa.string())])
+            elif col == "when":
+                table.add_columns([pa.field("when", pa.string())])
+            elif col == "where":
+                table.add_columns([pa.field("where", pa.string())])
+            elif col == "why":
+                table.add_columns([pa.field("why", pa.string())])
+            elif col == "how":
+                table.add_columns([pa.field("how", pa.string())])
+            elif col == "summary":
+                table.add_columns([pa.field("summary", pa.string())])
+            elif col == "confidence":
+                table.add_columns([pa.field("confidence", pa.float32())])
             log.info(f"Migrated schema: added {col}")
         except Exception as e:
             log.warning(f"Schema migration failed for {col}: {e}")

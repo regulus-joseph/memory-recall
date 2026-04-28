@@ -39,6 +39,14 @@ const RECALL_CACHE_TTL_MS = 30_000;
 
 const recallCache = new Map<string, RecallCache>();
 
+interface SessionBufferEntry {
+  content: string;
+  metadata: Record<string, unknown>;
+}
+const sessionBuffers = new Map<string, SessionBufferEntry[]>();
+
+let _worker: WorkerClient | undefined;
+
 class WorkerClient {
   private proc: ReturnType<typeof spawn>;
   private pending: Map<number, { resolve: (v: unknown) => void; reject: (e: Error) => void }> = new Map();
@@ -153,16 +161,16 @@ class WorkerClient {
     const lines = data.split("\n");
     for (const line of lines) {
       if (!line.trim()) continue;
-      if (!this.ready && line.includes('"result"')) {
-        this.onceReady();
-      }
       try {
-        const msg = JSON.parse(line);
-        if (msg.id !== undefined && this.pending.has(msg.id)) {
-          const cb = this.pending.get(msg.id)!;
-          this.pending.delete(msg.id);
+        const msg = JSON.parse(line) as Record<string, unknown>;
+        if (!this.ready && msg.id !== undefined && "result" in msg) {
+          this.onceReady();
+        }
+        if (msg.id !== undefined && this.pending.has(msg.id as number)) {
+          const cb = this.pending.get(msg.id as number)!;
+          this.pending.delete(msg.id as number);
           if (msg.error) {
-            cb.reject(new Error(msg.error.message || JSON.stringify(msg.error)));
+            cb.reject(new Error((msg.error as { message?: string }).message || JSON.stringify(msg.error)));
           } else {
             cb.resolve(msg.result);
           }
@@ -311,16 +319,22 @@ const memoryRecallPlugin = {
     const workerPath = require.resolve("./worker.py").replace(/\.py$/, ".py");
     const pythonBin = process.env.PYTHON_BIN || PYTHON_BIN;
 
-    let worker: WorkerClient;
+    if (_worker) {
+      _worker.kill();
+      _worker = undefined;
+    }
+
     try {
-      worker = new WorkerClient(pythonBin, workerPath, pluginDir.replace(/\/src$/, ""));
-      worker.health().catch((e) => {
+      _worker = new WorkerClient(pythonBin, workerPath, pluginDir.replace(/\/src$/, ""));
+      _worker.health().catch((e) => {
         api.logger.error(`[memory-recall] worker failed to start: ${e.message}`);
       });
     } catch (e) {
       api.logger.error(`[memory-recall] worker spawn failed: ${String(e)}`);
       return;
     }
+
+    const worker = _worker;
 
     api.logger.info(`[memory-recall] register, python=${pythonBin}`);
 
@@ -515,14 +529,20 @@ const memoryRecallPlugin = {
         const sessionKey = event.sessionKey ?? event.from ?? "default";
         const maxResults = config.autoRecallMaxItems ?? 3;
 
+        const metadata = { role: "user", sender: event.from, channel_id: event.channelId };
         worker.store({
           content: text,
           agent_id: event.from,
           conversation_id: event.conversationId,
-          metadata: { role: "user", sender: event.from, channel_id: event.channelId },
+          metadata,
         }).catch(err => {
           api.logger.warn(`[memory-recall] auto-store failed: ${String(err)}`);
         });
+
+        if (!sessionBuffers.has(sessionKey)) {
+          sessionBuffers.set(sessionKey, []);
+        }
+        sessionBuffers.get(sessionKey)!.push({ content: text, metadata });
 
         if (autoRecall) {
           worker.recall({ query: text, max_results: maxResults })
@@ -540,19 +560,23 @@ const memoryRecallPlugin = {
       }, { name: "memory-recall-autostore" });
 
       api.registerHook("agent_end", async (event) => {
+        const sessionKey = event.sessionKey ?? "default";
         const messages = event.messages as Array<{ role?: string; content?: unknown }>;
         for (const msg of messages) {
           if (msg.role === "assistant") {
             const text = extractText(msg.content);
             if (text && text.length > 10) {
-              try {
-                await worker.store({
-                  content: text,
-                  metadata: { role: "assistant" },
-                });
-              } catch (err) {
+              const metadata = { role: "assistant" };
+              worker.store({
+                content: text,
+                metadata,
+              }).catch(err => {
                 api.logger.warn(`[memory-recall] agent_end store failed: ${String(err)}`);
+              });
+              if (!sessionBuffers.has(sessionKey)) {
+                sessionBuffers.set(sessionKey, []);
               }
+              sessionBuffers.get(sessionKey)!.push({ content: text, metadata });
             }
           }
         }
@@ -593,6 +617,30 @@ const memoryRecallPlugin = {
     }
 
     api.logger.info("[memory-recall] all hooks and tools registered");
+
+    api.registerHook("session_end", async (event) => {
+      const sessionKey = event.sessionKey ?? "default";
+      recallCache.delete(sessionKey);
+      const buffer = sessionBuffers.get(sessionKey);
+      if (buffer && buffer.length > 0) {
+        api.logger.info(`[memory-recall] session_end: flushing ${buffer.length} buffered messages for session ${sessionKey}`);
+        const flushPromises = buffer.map(entry =>
+          worker.store({
+            content: entry.content,
+            metadata: entry.metadata,
+          }).catch(err => {
+            api.logger.warn(`[memory-recall] session_end flush failed: ${String(err)}`);
+          })
+        );
+        await Promise.all(flushPromises);
+        api.logger.info(`[memory-recall] session_end: flush complete`);
+      }
+      sessionBuffers.delete(sessionKey);
+    }, { name: "memory-recall-session-end" });
+
+    api.registerHook("gateway_stop", async () => {
+      if (worker) worker.kill();
+    }, { name: "memory-recall-gateway-stop" });
 
     if (config.decayEnabled !== false) {
       const intervalMs = (config.decayIntervalHours ?? 24) * 60 * 60 * 1000;
