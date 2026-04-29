@@ -122,23 +122,113 @@ interface InternalHookEvent {
 - **超时**：单个 handler 超时 30000ms
 - **全局回滚**：`activePluginHookRegistrations` 全局 Map，存储每个 plugin 的 hook 注册，供热重载时回滚
 
-### 3.3 Hook 事件类型
+### 3.3 Hook 事件类型（完整列表，29 个）
 
-定义在 `src/hooks/internal-hooks.ts`：
+基于 `plugin-sdk/src/plugins/hook-types.d.ts` 的 `PluginHookName` 类型定义：
 
-| 分类 | 事件 |
-|------|------|
-| **Agent** | `before_agent_start`, `after_agent_start`, `before_agent_end`, `after_agent_end` |
-| **Prompt** | `before_prompt_build`, `after_prompt_build` |
-| **Command** | `before_command_execute`, `after_command_execute` |
-| **Message** | `before_message_process`, `after_message_process`, `after_message_append` |
-| **Session** | `after_session_start`, `after_session_reset`, `after_session_stop` |
-| **Gateway** | `after_gateway_start`, `before_gateway_stop` |
-| **Tool** | `before_tool_call`, `after_tool_call` |
-| **Compaction** | `before_compaction`, `after_compaction` |
-| **Reset** | `before_reset`, `after_reset` |
+| 分类 | 事件 | 说明 |
+|------|------|------|
+| **Model** | `before_model_resolve` | 模型解析前，可在此时修改模型选择 |
+| **Prompt** | `before_prompt_build` | Prompt 构建前，注入记忆/状态（policy-layer 用这个） |
+| **Agent** | `before_agent_start` | Agent 运行前 |
+| **Agent** | `before_agent_reply` | Agent 回复前，可拦截或替换回复 |
+| **LLM** | `llm_input` | LLM 输入前，可修改 system prompt / history |
+| **LLM** | `llm_output` | LLM 输出后，可处理 assistant 文本 |
+| **Agent** | `agent_end` | Agent 运行结束，可做存储/反思 |
+| **Tool** | `before_tool_call` | 工具调用前，可拦截/审批/修改参数（核心安全 hook） |
+| **Tool** | `after_tool_call` | 工具调用后，可处理结果/做 secret redaction |
+| **Tool** | `tool_result_persist` | 工具结果持久化前，可修改写入内容 |
+| **Message** | `inbound_claim` | 入站消息认领前，可做 channel 级别的权限检查 |
+| **Message** | `message_received` | 消息接收后（已去重），可做处理 |
+| **Message** | `message_sending` | 消息发送前，可拦截/修改出站内容 |
+| **Message** | `message_sent` | 消息发送后 |
+| **Message** | `before_message_write` | 消息写入 session 前，可拦截 |
+| **Session** | `session_start` | Session 启动 |
+| **Session** | `session_end` | Session 结束（含 reason/durationMs） |
+| **Subagent** | `subagent_spawning` | Subagent 启动前 |
+| **Subagent** | `subagent_delivery_target` | Subagent 投递目标确定时 |
+| **Subagent** | `subagent_spawned` | Subagent 启动后 |
+| **Subagent** | `subagent_ended` | Subagent 结束时 |
+| **Dispatch** | `before_dispatch` | 出站分发前（channel 投递） |
+| **Dispatch** | `reply_dispatch` | 回复分发时，可控制 sendPolicy |
+| **Compaction** | `before_compaction` | 压缩前 |
+| **Compaction** | `after_compaction` | 压缩后 |
+| **Reset** | `before_reset` | Session reset 前 |
+| **Gateway** | `gateway_start` | Gateway 启动后 |
+| **Gateway** | `gateway_stop` | Gateway 停止前 |
+| **Install** | `before_install` | 插件/skill 安装前，可做安全扫描 |
 
-### 3.4 插件 Hook 注册流程
+**已废弃/不存在的旧 hook（文档曾错误列出，需删除）：**
+- ❌ `after_agent_start`（不存在）
+- ❌ `after_agent_end`（不存在，用 `agent_end`）
+- ❌ `after_prompt_build`（不存在）
+- ❌ `before_command_execute` / `after_command_execute`（不存在）
+- ❌ `before_message_process` / `after_message_process` / `after_message_append`（不存在）
+- ❌ `after_session_start` / `after_session_reset` / `after_session_stop`（不存在，用 `session_start` / `session_end`）
+- ❌ `after_gateway_start`（不存在，用 `gateway_start`）
+
+### 3.4 安全相关 Hook 详解
+
+**`before_tool_call` — 核心安全 hook（Layer 1-3 实现点）**
+
+```typescript
+// 参数
+{ toolName: string; params: Record<string, unknown>; runId?: string; toolCallId?: string }
+
+// 返回值
+{
+  params?: Record<string, unknown>;        // 可修改参数
+  block?: boolean;                        // 直接阻止
+  blockReason?: string;
+  requireApproval?: {                     // 触发人工审批 UI
+    title: string;
+    description: string;
+    severity?: "info" | "warning" | "critical";
+    timeoutMs?: number;
+    timeoutBehavior?: "allow" | "deny";
+    pluginId?: string;
+    onResolution?: (decision: PluginApprovalResolution) => Promise<void>;
+  };
+}
+
+// 审批决议
+type PluginApprovalResolution =
+  | "allow-once"   // 本次放行
+  | "allow-always" // 本 session 永久放行
+  | "deny"         // 拒绝
+  | "timeout"      // 超时未响应
+  | "cancelled";   // 取消
+```
+
+**`after_tool_call` — Secret Redaction 实现点（Layer 4）**
+```typescript
+{ toolName: string; params: Record<string, unknown>; runId?: string;
+  toolCallId?: string; result?: unknown; error?: string; durationMs?: number; }
+```
+
+**`message_sending` — Channel 出站内容检查实现点**
+```typescript
+// 可返回 { handled: boolean; } 拦截消息发送
+```
+
+**`inbound_claim` — Channel 入站权限验证实现点**
+```typescript
+// 可做 channel 级别的 sender 权限检查
+```
+
+**`before_dispatch` — 出站分发前检查（channel 集成关键）**
+```typescript
+{ content: string; body?: string; channel?: string;
+  sessionKey?: string; senderId?: string; isGroup?: boolean; }
+```
+
+**`llm_input` — Prompt 注入实现点**
+```typescript
+{ runId: string; sessionId: string; provider: string; model: string;
+  systemPrompt?: string; prompt: string; historyMessages: unknown[]; imagesCount: number; }
+```
+
+### 3.5 插件 Hook 注册流程
 
 ```
 Plugin: api.on("before_prompt_build", handler, opts)
@@ -161,7 +251,7 @@ Plugin: api.on("before_prompt_build", handler, opts)
             └─ internalHooks.get(event).push({ handler, options })
 ```
 
-### 3.5 强类型 Hook vs 底层 Hook
+### 3.6 强类型 Hook vs 底层 Hook
 
 **强类型 Hook**（`api.on(hookName, handler)`）：
 - 使用 `PluginHookName` 类型，自动推断事件参数类型
@@ -173,7 +263,7 @@ Plugin: api.on("before_prompt_build", handler, opts)
 - 事件名是字符串，支持多事件注册
 - 事件对象是扁平的 `InternalHookEvent`
 
-### 3.6 Loader：第三种 Hook 来源
+### 3.7 Loader：第三种 Hook 来源
 
 `src/hooks/loader.ts`：`loadInternalHooks(config, workspaceDir)`
 - 加载自：workspace 目录、managed hooks、bundled hooks
@@ -309,43 +399,39 @@ resolvePluginRuntime(pluginId): PluginRuntime
 
 ---
 
-## 6. 与 MLP 的集成
+## 6. 与 MLP / memory-recall 的集成
 
-MLP（Memory-LanceDB-Pro）作为 OpenClaw 插件，通过以下方式使用 Hook 系统：
+memory-recall 作为 OpenClaw 插件，通过以下方式使用 Hook 系统：
 
 ### 6.1 Hook 注册方式
 
 ```typescript
 api.on("before_prompt_build", recallHandler, {
-  name: "mlp-recall",
-  description: "Retrieve relevant memories",
+  name: "memory-recall-recall",
+  description: "Inject relevant memories into prompt",
   priority: 10,  // recall 最先执行
 })
 
-api.on("after_message_process", captureHandler, {
-  name: "mlp-capture",
-  description: "Capture messages into memory",
-  // fire-and-forget，不 await
+api.on("message_received", storeHandler, {
+  name: "memory-recall-store",
+  description: "Fire-and-forget recall for session cache",
 })
 
-api.on("after_agent_end", reflectionHandler, {
-  name: "mlp-reflection",
-  description: "Analyze and store reflections",
-  priority: 12,  // 在继承之后执行
+api.on("agent_end", storeHandler, {
+  name: "memory-recall-agent-end",
+  description: "Store assistant messages to memory",
 })
 ```
 
-### 6.2 优先级约定（MLP）
+### 6.2 优先级约定（memory-recall）
 
 | 优先级 | Hook | 功能 |
 |--------|------|------|
-| 10 | before_prompt_build | recall（记忆召回） |
-| 12 | before_prompt_build | reflection_inheritance（反射继承） |
-| 15 | before_prompt_build | reflection_derived（衍生反射） |
-| — | after_message_process | capture（消息捕获） |
-| — | after_agent_end | reflection（反思分析） |
+| 10 | before_prompt_build | recall（从 cache 读记忆，<1ms） |
+| — | message_received | fire-and-forget recall（异步预热 cache） |
+| — | agent_end | store（等待存储完成） |
 
-### 6.3 MLP 不使用工具系统
+### 6.3 memory-recall 不使用工具系统
 
 MLP 通过 Hook 系统实现，无需注册 agent 工具。所有记忆操作（recall / capture / reflection）都在 Hook handler 中完成。
 
@@ -355,20 +441,17 @@ MLP 通过 Hook 系统实现，无需注册 agent 工具。所有记忆操作（
 
 | 文件 | 职责 |
 |------|------|
+| `plugin-sdk/src/plugins/hook-types.d.ts` | **真实 Hook 类型定义（PluginHookName 等）** |
+| `plugin-sdk/src/plugins/hook-before-agent-start.types.d.ts` | before_agent_start / before_prompt_build 事件类型 |
+| `plugin-sdk/src/plugins/hook-message.types.d.ts` | message_received / message_sending / message_sent 类型 |
 | `src/plugins/types.ts` | OpenClawPluginApi 接口定义（~2065 行） |
 | `src/plugins/api-builder.ts` | buildPluginApi — 组装 API 对象 |
 | `src/plugins/registry.ts` | createPluginRegistry — 插件注册逻辑中心 |
 | `src/plugins/registry-types.ts` | 注册类型定义 |
 | `src/plugins/tool-types.ts` | OpenClawPluginToolFactory / ToolContext |
 | `src/plugins/tools.ts` | resolvePluginTools — 工具解析入口 |
-| `src/plugins/registry-empty.ts` | createEmptyPluginRegistry — 初始化空 registry |
-| `src/hooks/internal-hooks.ts` | registerInternalHook / triggerInternalHook — Hook 引擎核心 |
-| `src/hooks/internal-hook-types.ts` | InternalHookHandler / InternalHookEvent 类型 |
-| `src/hooks/loader.ts` | loadInternalHooks — Hook 加载器 |
-| `src/hooks/hook-types.ts` | 插件可见的 Hook 类型导出 |
-| `src/gateway/hooks.ts` | 外部 HTTP Webhook 系统 |
-| `src/agents/tools-effective-inventory.ts` | resolveEffectiveToolInventory — 工具清单 API |
 | `src/agents/pi-tools.ts` | createOpenClawCodingTools — 工具组装主函数 |
-| `src/agents/openclaw-tools.ts` | createOpenClawTools — OpenClaw 内置工具 + 插件工具 |
 | `src/agents/openclaw-plugin-tools.ts` | resolveOpenClawPluginToolsForOptions — 插件工具解析入口 |
 | `packages/plugin-sdk/src/plugin-entry.ts` | 公共 SDK 导出入口 |
+
+> **注意**：表格中带 `plugin-sdk/` 前缀的文件位于 openclaw 的 `dist/plugin-sdk/` 目录下（npm 发布版），源码路径不同。

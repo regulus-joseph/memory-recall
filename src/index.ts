@@ -1,6 +1,10 @@
 /**
  * Memory Recall - OpenClaw Plugin
- * Architecture: TS plugin → Python worker (stdio JSON-RPC) → per-agent LanceDB + NetworkX Graph
+ * Architecture: TS plugin → Pool Worker (HTTP JSON-RPC) → per-agent LanceDB + NetworkX Graph
+ *
+ * Two transport modes (set USE_HTTP_POOL=1 env to switch):
+ *   stdin  (default):  TS plugin → worker.py subprocess (stdio JSON-RPC)
+ *   http   (pool):     TS plugin → pool_router.py (HTTP) → worker.py subprocess per session
  *
  * Design: recall is non-blocking via session-level cache.
  * - message_received → fire-and-forget recall → update cache
@@ -207,7 +211,7 @@ class WorkerClient {
     agent_id?: string;
     conversation_id?: string;
     metadata?: Record<string, unknown>;
-  }): Promise<{ memory_id: string; conversation_id: string; dedup: boolean }> {
+  }, _sessionId?: string): Promise<{ memory_id: string; conversation_id: string; dedup: boolean }> {
     return this.call("store", params);
   }
 
@@ -216,7 +220,7 @@ class WorkerClient {
     agent_id?: string;
     max_results?: number;
     min_score?: number;
-  }): Promise<{
+  }, _sessionId?: string): Promise<{
     results: Array<Record<string, unknown>>;
     count: number;
     layers: { l1: number; l2: number; l3: number };
@@ -224,7 +228,7 @@ class WorkerClient {
     return this.call("recall", params);
   }
 
-  async forget(params: { memory_id: string }): Promise<{ memory_id: string; deleted: boolean }> {
+  async forget(params: { memory_id: string }, _sessionId?: string): Promise<{ memory_id: string; deleted: boolean }> {
     return this.call("forget", params);
   }
 
@@ -232,11 +236,11 @@ class WorkerClient {
     memory_id: string;
     content?: string;
     metadata?: Record<string, unknown>;
-  }): Promise<{ memory_id: string; updated: boolean }> {
+  }, _sessionId?: string): Promise<{ memory_id: string; updated: boolean }> {
     return this.call("update", params);
   }
 
-  async stats(params: { agent_id?: string }): Promise<{
+  async stats(params: { agent_id?: string }, _sessionId?: string): Promise<{
     memory_count: number;
     bm25_doc_count: number;
     graph_node_count: number;
@@ -244,7 +248,7 @@ class WorkerClient {
     return this.call("stats", params);
   }
 
-  async compact(params: { dry_run?: boolean; limit?: number; scopes?: string[] }): Promise<{
+  async compact(params: { dry_run?: boolean; limit?: number; scopes?: string[] }, _sessionId?: string): Promise<{
     clusters_found: number;
     memories_deleted: number;
     memories_created: number;
@@ -253,7 +257,7 @@ class WorkerClient {
     return this.call("compact", params);
   }
 
-  async graphRebuild(params: { agent_id?: string }): Promise<{
+  async graphRebuild(params: { agent_id?: string }, _sessionId?: string): Promise<{
     agents_rebuilt: number;
     dangling_edges_cleaned: number;
   }> {
@@ -266,7 +270,7 @@ class WorkerClient {
     also_compact?: boolean;
     also_graph_rebuild?: boolean;
     agent_id?: string;
-  }): Promise<{
+  }, _sessionId?: string): Promise<{
     stale_count: number;
     stale_memories: Array<Record<string, unknown>>;
     deleted: number;
@@ -280,6 +284,124 @@ class WorkerClient {
     this.proc.kill();
   }
 }
+
+// ─── HTTP Pool Client ───────────────────────────────────────────────────────────────
+// Used when USE_HTTP_POOL=1. Talks to pool_router.py (default port 18799).
+// Each call passes _session_id for session affinity.
+
+const POOL_ROUTER_URL = process.env.MR_ROUTER_URL || "http://127.0.0.1:18799";
+
+class PoolWorkerClient {
+  private routerUrl: string;
+
+  constructor(routerUrl?: string) {
+    this.routerUrl = routerUrl || POOL_ROUTER_URL;
+  }
+
+  private async _call<T>(method: string, params: Record<string, unknown>, sessionId?: string): Promise<T> {
+    const body: Record<string, unknown> = { ...params };
+    if (sessionId) body._session_id = sessionId;
+
+    const resp = await fetch(`${this.routerUrl}/mr/${method}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(30000),
+    });
+
+    if (!resp.ok) {
+      const detail = await resp.text().catch(() => resp.statusText);
+      throw new Error(`pool HTTP ${resp.status}: ${detail}`);
+    }
+
+    const data = await resp.json() as T;
+    return data;
+  }
+
+  async health(): Promise<{ status: string }> {
+    return this._call("health", {}, undefined);
+  }
+
+  async store(params: {
+    content: string;
+    agent_id?: string;
+    conversation_id?: string;
+    metadata?: Record<string, unknown>;
+  }, sessionId?: string): Promise<{ memory_id: string; conversation_id: string; dedup: boolean }> {
+    return this._call("store", params, sessionId);
+  }
+
+  async recall(params: {
+    query: string;
+    agent_id?: string;
+    max_results?: number;
+    min_score?: number;
+  }, sessionId?: string): Promise<{
+    memories: Array<{ content: unknown; relevance_score: number; category: string }>;
+    recall_time_ms: number;
+  }> {
+    return this._call("recall", params, sessionId);
+  }
+
+  async forget(params: { memory_id: string }, sessionId?: string): Promise<{ memory_id: string; deleted: boolean }> {
+    return this._call("forget", params, sessionId);
+  }
+
+  async update(params: {
+    memory_id: string;
+    content?: string;
+    metadata?: Record<string, unknown>;
+  }, sessionId?: string): Promise<{ memory_id: string; updated: boolean }> {
+    return this._call("update", params, sessionId);
+  }
+
+  async stats(params: { agent_id?: string }, sessionId?: string): Promise<{
+    memory_count: number;
+    bm25_doc_count: number;
+    graph_node_count: number;
+  }> {
+    return this._call("stats", params, sessionId);
+  }
+
+  async compact(params: { dry_run?: boolean; limit?: number; scopes?: string[] }, sessionId?: string): Promise<{
+    clusters_found: number;
+    memories_deleted: number;
+    memories_created: number;
+    dry_run: boolean;
+  }> {
+    return this._call("compact", params, sessionId);
+  }
+
+  async graphRebuild(params: { agent_id?: string }, sessionId?: string): Promise<{
+    agents_rebuilt: number;
+    dangling_edges_cleaned: number;
+  }> {
+    return this._call("graph_rebuild", params, sessionId);
+  }
+
+  async decayScan(params: {
+    dry_run?: boolean;
+    limit?: number;
+    also_compact?: boolean;
+    also_graph_rebuild?: boolean;
+    agent_id?: string;
+  }, sessionId?: string): Promise<{
+    stale_count: number;
+    stale_memories: Array<Record<string, unknown>>;
+    deleted: number;
+    compacted: number;
+    dry_run: boolean;
+  }> {
+    return this._call("decay_scan", params, sessionId);
+  }
+
+  kill() {} // no-op: pool owns worker lifecycle
+}
+
+// ─── Unified Worker Interface ────────────────────────────────────────────────────
+// Both WorkerClient and PoolWorkerClient share the same method surface.
+
+type Worker = WorkerClient | PoolWorkerClient;
 
 function extractText(content: unknown): string | null {
   if (typeof content === "string") return content.trim();
@@ -324,19 +446,28 @@ const memoryRecallPlugin = {
       _worker = undefined;
     }
 
-    try {
-      _worker = new WorkerClient(pythonBin, workerPath, pluginDir.replace(/\/src$/, ""));
+    const usePool = process.env.USE_HTTP_POOL === "1";
+
+    if (usePool) {
+      _worker = new PoolWorkerClient(POOL_ROUTER_URL);
+      api.logger.info(`[memory-recall] HTTP pool mode, router=${POOL_ROUTER_URL}`);
       _worker.health().catch((e) => {
-        api.logger.error(`[memory-recall] worker failed to start: ${e.message}`);
+        api.logger.error(`[memory-recall] pool health check failed: ${e.message}`);
       });
-    } catch (e) {
-      api.logger.error(`[memory-recall] worker spawn failed: ${String(e)}`);
-      return;
+    } else {
+      try {
+        _worker = new WorkerClient(pythonBin, workerPath, pluginDir.replace(/\/src$/, ""));
+        _worker.health().catch((e) => {
+          api.logger.error(`[memory-recall] worker failed to start: ${e.message}`);
+        });
+      } catch (e) {
+        api.logger.error(`[memory-recall] worker spawn failed: ${String(e)}`);
+        return;
+      }
+      api.logger.info(`[memory-recall] stdin mode, python=${pythonBin}`);
     }
 
     const worker = _worker;
-
-    api.logger.info(`[memory-recall] register, python=${pythonBin}`);
 
     try {
       const runtimeObj = {
@@ -535,7 +666,7 @@ const memoryRecallPlugin = {
           agent_id: event.from,
           conversation_id: event.conversationId,
           metadata,
-        }).catch(err => {
+        }, sessionKey).catch(err => {
           api.logger.warn(`[memory-recall] auto-store failed: ${String(err)}`);
         });
 
@@ -545,7 +676,7 @@ const memoryRecallPlugin = {
         sessionBuffers.get(sessionKey)!.push({ content: text, metadata });
 
         if (autoRecall) {
-          worker.recall({ query: text, max_results: maxResults })
+          worker.recall({ query: text, max_results: maxResults }, sessionKey)
             .then(data => {
               if (data && (data.results as unknown[]).length > 0) {
                 recallCache.set(sessionKey, {
@@ -570,7 +701,7 @@ const memoryRecallPlugin = {
               worker.store({
                 content: text,
                 metadata,
-              }).catch(err => {
+              }, sessionKey).catch(err => {
                 api.logger.warn(`[memory-recall] agent_end store failed: ${String(err)}`);
               });
               if (!sessionBuffers.has(sessionKey)) {
@@ -628,7 +759,7 @@ const memoryRecallPlugin = {
           worker.store({
             content: entry.content,
             metadata: entry.metadata,
-          }).catch(err => {
+          }, sessionKey).catch(err => {
             api.logger.warn(`[memory-recall] session_end flush failed: ${String(err)}`);
           })
         );

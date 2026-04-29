@@ -292,6 +292,7 @@ async def _llm_extract(content: str) -> dict:
                     "model": LLM_MODEL,
                     "messages": [{"role": "user", "content": prompt}],
                     "stream": False,
+                    "think": False,
                 },
             )
             resp.raise_for_status()
@@ -1319,5 +1320,66 @@ async def main():
         print(json.dumps(result, ensure_ascii=False), flush=True)
 
 
+# ─── HTTP Server Mode ──────────────────────────────────────────────────────────────
+# Phase 1: Add HTTP endpoint to existing worker, keep stdin mode as default.
+# Run with: python worker.py --http-port 18799
+
+import argparse
+from fastapi import FastAPI, HTTPException
+from contextlib import asynccontextmanager
+
+_http_app: FastAPI | None = None
+_worker_session_id: str | None = None
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    log.info(f"HTTP worker started, session={_worker_session_id or '(pool)'}")
+    yield
+    log.info("HTTP worker stopped")
+
+
+def make_app(session_id: str | None) -> FastAPI:
+    app = FastAPI(lifespan=lifespan)
+
+    @app.get("/health")
+    async def http_health():
+        return await cmd_health({})
+
+    @app.get("/ping")
+    async def http_ping():
+        return await cmd_ping({})
+
+    @app.post("/mr/{method}")
+    async def http_dispatch(method: str, payload: dict | None = None):
+        if method not in METHODS:
+            raise HTTPException(status_code=404, detail=f"Method not found: {method}")
+        payload = payload or {}
+        try:
+            result = await METHODS[method](payload)
+            return result
+        except Exception as e:
+            log.error(f"HTTP {method} error: {e}")
+            raise HTTPException(status_code=500, detail=str(e))
+
+    return app
+
+
+def run_http_server(port: int, session_id: str | None = None) -> None:
+    global _http_app, _worker_session_id
+    _worker_session_id = session_id
+    _http_app = make_app(session_id)
+    import uvicorn
+    uvicorn.run(_http_app, host="127.0.0.1", port=port, log_level="info")
+
+
 if __name__ == "__main__":
-    asyncio.run(main())
+    parser = argparse.ArgumentParser(description="Memory Recall Worker")
+    parser.add_argument("--http-port", type=int, default=None, help="Run as HTTP server on this port (instead of stdin/stdout)")
+    parser.add_argument("--session-id", type=str, default=None, help="Session ID for this worker instance")
+    args = parser.parse_args()
+
+    if args.http_port:
+        run_http_server(args.http_port, session_id=args.session_id)
+    else:
+        asyncio.run(main())
