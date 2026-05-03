@@ -303,6 +303,35 @@ class WorkerClient {
     return this.call("decay_scan", params);
   }
 
+  async list(params: {
+    agent_id?: string;
+    category?: string;
+    conversation_id?: string;
+    limit?: number;
+    offset?: number;
+    sort?: string;
+  }, _sessionId?: string): Promise<{
+    memories: Array<Record<string, unknown>>;
+    count: number;
+    offset: number;
+    limit: number;
+    agent_id: string;
+  }> {
+    return this.call("list", params);
+  }
+
+  async search(params: {
+    query: string;
+    agent_id?: string;
+    limit?: number;
+    offset?: number;
+  }, _sessionId?: string): Promise<{
+    results: Array<Record<string, unknown>>;
+    count: number;
+  }> {
+    return this.call("search", params);
+  }
+
   kill() {
     this.proc.kill();
   }
@@ -439,6 +468,35 @@ class PoolWorkerClient {
     dry_run: boolean;
   }> {
     return this._call("decay_scan", params, sessionId);
+  }
+
+  async list(params: {
+    agent_id?: string;
+    category?: string;
+    conversation_id?: string;
+    limit?: number;
+    offset?: number;
+    sort?: string;
+  }, sessionId?: string): Promise<{
+    memories: Array<Record<string, unknown>>;
+    count: number;
+    offset: number;
+    limit: number;
+    agent_id: string;
+  }> {
+    return this._call("list", params, sessionId);
+  }
+
+  async search(params: {
+    query: string;
+    agent_id?: string;
+    limit?: number;
+    offset?: number;
+  }, sessionId?: string): Promise<{
+    results: Array<Record<string, unknown>>;
+    count: number;
+  }> {
+    return this._call("search", params, sessionId);
   }
 
   kill() {} // no-op: pool owns worker lifecycle
@@ -715,7 +773,7 @@ const memoryRecallPlugin = {
           conversation_id?: string; agent_id?: string; since?: string; until?: string; limit?: number; summary_only?: boolean;
         }) {
           try {
-            const data = await (worker as unknown as { browse: Function }).browse({
+            const data = await (worker as unknown as { list: Function }).list({
               conversation_id: params.conversation_id,
               agent_id: params.agent_id,
               since: params.since,
@@ -764,6 +822,92 @@ const memoryRecallPlugin = {
         },
       },
       { name: "memory_browse" }
+    );
+
+    api.registerTool(
+      {
+        name: "memory_list",
+        label: "List Memories",
+        description: "List all memories with optional category/conversation filter and pagination.",
+        parameters: Type.Object({
+          agent_id: Type.Optional(Type.String()),
+          category: Type.Optional(Type.String()),
+          conversation_id: Type.Optional(Type.String()),
+          limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100, default: 20 })),
+          offset: Type.Optional(Type.Integer({ minimum: 0, default: 0 })),
+          sort: Type.Optional(Type.String({ default: "desc" })),
+        }),
+        async execute(_toolCallId: string, params: {
+          agent_id?: string; category?: string; conversation_id?: string; limit?: number; offset?: number; sort?: string;
+        }) {
+          try {
+            const data = await (worker as unknown as { list: Function }).browse({
+              agent_id: params.agent_id,
+              category: params.category,
+              conversation_id: params.conversation_id,
+              limit: params.limit,
+              offset: params.offset,
+              sort: params.sort,
+            });
+            const mems = (data.memories as Array<Record<string, unknown>>) || [];
+            const lines = mems.map((m) =>
+              `[${m.category}][${m.stored_at}] ${String(m.content).slice(0, 80)}`
+            );
+            return {
+              content: [{ type: "text", text: `Listed ${mems.length} memories:\n${lines.join("\n")}` }],
+              details: data,
+            };
+          } catch (err) {
+            api.logger.error(`[memory-recall] list error: ${String(err)}`);
+            return {
+              content: [{ type: "text", text: `Failed to list memories: ${String(err)}` }],
+              details: { error: String(err) },
+            };
+          }
+        },
+      },
+      { name: "memory_list" }
+    );
+
+    api.registerTool(
+      {
+        name: "memory_search",
+        label: "Search Memories",
+        description: "Fast keyword search across all memories using BM25/jieba tokenization. Use for quick text search without embedding cost.",
+        parameters: Type.Object({
+          query: Type.String({ description: "Search query text" }),
+          agent_id: Type.Optional(Type.String()),
+          limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100, default: 20 })),
+          offset: Type.Optional(Type.Integer({ minimum: 0, default: 0 })),
+        }),
+        async execute(_toolCallId: string, params: {
+          query: string; agent_id?: string; limit?: number; offset?: number;
+        }) {
+          try {
+            const data = await (worker as unknown as { search: Function }).search({
+              query: params.query,
+              agent_id: params.agent_id,
+              limit: params.limit,
+              offset: params.offset,
+            });
+            const results = (data.results as Array<Record<string, unknown>>) || [];
+            const lines = results.map((r) =>
+              `[score:${r.score}][${r.category}] ${String(r.content).slice(0, 80)}`
+            );
+            return {
+              content: [{ type: "text", text: `Found ${results.length} results:\n${lines.join("\n")}` }],
+              details: data,
+            };
+          } catch (err) {
+            api.logger.error(`[memory-recall] search error: ${String(err)}`);
+            return {
+              content: [{ type: "text", text: `Failed to search memories: ${String(err)}` }],
+              details: { error: String(err) },
+            };
+          }
+        },
+      },
+      { name: "memory_search" }
     );
 
     api.registerTool(

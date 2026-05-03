@@ -815,6 +815,117 @@ async def cmd_browse(params: dict) -> dict:
     }
 
 
+async def cmd_list(params: dict) -> dict:
+    agent_id: str = params.get("agent_id") or "default"
+    category: str | None = params.get("category")
+    conversation_id: str | None = params.get("conversation_id")
+    limit: int = params.get("limit", 20)
+    offset: int = params.get("offset", 0)
+    sort: str = params.get("sort", "desc")
+
+    table = _agent_table(agent_id)
+
+    conditions: list[str] = [f'scope = "{agent_id}"']
+    if category:
+        conditions.append(f'category = "{category}"')
+    if conversation_id:
+        conditions.append(f'conversation_id = "{conversation_id}"')
+
+    where_clause = " AND ".join(conditions)
+
+    try:
+        results = (
+            table.search()
+            .where(where_clause)
+            .limit(limit)
+            .offset(offset)
+            .to_list()
+        )
+    except Exception as e:
+        log.warning(f"[list] query failed: {e}")
+        results = []
+
+    if sort == "asc":
+        results.sort(key=lambda r: float(r.get("timestamp", 0)))
+    else:
+        results.sort(key=lambda r: float(r.get("timestamp", 0)), reverse=True)
+
+    memories = []
+    for row in results:
+        meta = {}
+        try:
+            meta = json.loads(row.get("metadata_json", "{}"))
+        except Exception:
+            pass
+        memories.append({
+            "id": row["id"],
+            "content": row["text"],
+            "conversation_id": row.get("conversation_id", ""),
+            "category": row.get("category", "other"),
+            "importance": float(row.get("importance", 0.5)),
+            "stored_at": row.get("stored_at", ""),
+            "timestamp": float(row.get("timestamp", 0)),
+            "access_count": int(row.get("access_count", 0) or 0),
+            "summary": row.get("summary", ""),
+            "confidence": float(row.get("confidence", 0.5)),
+            **meta,
+        })
+
+    return {
+        "memories": memories,
+        "count": len(memories),
+        "offset": offset,
+        "limit": limit,
+        "agent_id": agent_id,
+    }
+
+
+async def cmd_search(params: dict) -> dict:
+    query: str = params["query"]
+    agent_id: str = params.get("agent_id") or "default"
+    limit: int = params.get("limit", 20)
+    offset: int = params.get("offset", 0)
+
+    if not query.strip():
+        return {"results": [], "count": 0}
+
+    table = _agent_table(agent_id)
+
+    try:
+        query_tokens = " ".join(_tokenize_for_fts(query))
+        results = (
+            table.search(query_tokens)
+            .where(f'scope = "{agent_id}"')
+            .limit(limit + offset)
+            .to_list()
+        )
+    except Exception as e:
+        log.warning(f"[search] BM25 failed: {e}")
+        return {"results": [], "count": 0, "error": str(e)}
+
+    results = results[offset:offset + limit]
+
+    memories = []
+    for row in results:
+        meta = {}
+        try:
+            meta = json.loads(row.get("metadata_json", "{}"))
+        except Exception:
+            pass
+        memories.append({
+            "id": row["id"],
+            "content": row["text"],
+            "conversation_id": row.get("conversation_id", ""),
+            "category": row.get("category", "other"),
+            "importance": float(row.get("importance", 0.5)),
+            "stored_at": row.get("stored_at", ""),
+            "score": round(float(row.get("_score", 0)), 4),
+            **meta,
+        })
+
+    return {"results": memories, "count": len(memories)}
+
+
 async def cmd_update(params: dict) -> dict:
     memory_id: str = params["memory_id"]
     new_content: str | None = params.get("content")
@@ -1439,6 +1550,8 @@ METHODS = {
     "forget": cmd_forget,
     "get": cmd_get,
     "browse": cmd_browse,
+    "list": cmd_list,
+    "search": cmd_search,
     "update": cmd_update,
     "stats": cmd_stats,
     "compact": cmd_compact,
