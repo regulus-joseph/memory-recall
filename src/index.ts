@@ -335,6 +335,31 @@ class WorkerClient {
   kill() {
     this.proc.kill();
   }
+
+  async extract(params: { content: string }): Promise<{
+    category: string;
+    importance: number;
+    confidence: number;
+    temporal_type: string;
+    who: string;
+    what: string;
+    when: string;
+    where: string;
+    why: string;
+    how: string;
+    summary: string;
+  }> {
+    return this.call("extract", params);
+  }
+
+  async reset(params: { agent_id?: string; force?: boolean }): Promise<{
+    reset: boolean;
+    deleted?: number;
+    agent_id?: string;
+    error?: string;
+  }> {
+    return this.call("reset", params);
+  }
 }
 
 // ─── HTTP Pool Client ───────────────────────────────────────────────────────────────
@@ -497,6 +522,31 @@ class PoolWorkerClient {
     count: number;
   }> {
     return this._call("search", params, sessionId);
+  }
+
+  async extract(params: { content: string }, sessionId?: string): Promise<{
+    category: string;
+    importance: number;
+    confidence: number;
+    temporal_type: string;
+    who: string;
+    what: string;
+    when: string;
+    where: string;
+    why: string;
+    how: string;
+    summary: string;
+  }> {
+    return this._call("extract", params, sessionId);
+  }
+
+  async reset(params: { agent_id?: string; force?: boolean }, sessionId?: string): Promise<{
+    reset: boolean;
+    deleted?: number;
+    agent_id?: string;
+    error?: string;
+  }> {
+    return this._call("reset", params, sessionId);
   }
 
   kill() {} // no-op: pool owns worker lifecycle
@@ -908,6 +958,93 @@ const memoryRecallPlugin = {
         },
       },
       { name: "memory_search" }
+    );
+
+    api.registerTool(
+      {
+        name: "memory_extract",
+        label: "Extract Memory Structure",
+        description: "Run LLM extraction on any text to extract structured memory fields (category, importance, 6W entities, temporal type). Use to analyze text before deciding whether to store it.",
+        parameters: Type.Object({
+          content: Type.String({ description: "Text to analyze and extract memory structure from" }),
+        }),
+        async execute(_toolCallId: string, params: { content: string }) {
+          try {
+            const data = await (worker as unknown as { extract: Function }).extract({ content: params.content });
+            if ((data as Record<string, unknown>).error) {
+              return { content: [{ type: "text", text: `Extract failed: ${(data as Record<string, unknown>).error}` }], details: data };
+            }
+            const d = data as Record<string, unknown>;
+            return {
+              content: [{
+                type: "text",
+                text: `[${d.category}][importance: ${d.importance}][${d.temporal_type}]\n6W: who=${d.who} when=${d.when} where=${d.where} why=${d.why} how=${d.how}\nSummary: ${d.summary}`,
+              }],
+              details: data,
+            };
+          } catch (err) {
+            api.logger.error(`[memory-recall] extract error: ${String(err)}`);
+            return { content: [{ type: "text", text: `Extract failed: ${String(err)}` }], details: { error: String(err) } };
+          }
+        },
+      },
+      { name: "memory_extract" }
+    );
+
+    api.registerTool(
+      {
+        name: "memory_reset",
+        label: "Reset Memories",
+        description: "Permanently delete all memories for an agent. DANGEROUS — requires force:true.",
+        parameters: Type.Object({
+          agent_id: Type.Optional(Type.String()),
+          force: Type.Optional(Type.Boolean({ default: false })),
+        }),
+        async execute(_toolCallId: string, params: { agent_id?: string; force?: boolean }) {
+          try {
+            const data = await (worker as unknown as { reset: Function }).reset({ agent_id: params.agent_id, force: params.force });
+            if (!(data as Record<string, unknown>).reset) {
+              return { content: [{ type: "text", text: `Reset aborted: ${(data as Record<string, unknown>).error || "need force:true"}` }], details: data };
+            }
+            return { content: [{ type: "text", text: `Reset complete: ${(data as Record<string, unknown>).deleted} memories deleted.` }], details: data };
+          } catch (err) {
+            api.logger.error(`[memory-recall] reset error: ${String(err)}`);
+            return { content: [{ type: "text", text: `Reset failed: ${String(err)}` }], details: { error: String(err) } };
+          }
+        },
+      },
+      { name: "memory_reset" }
+    );
+
+    api.registerTool(
+      {
+        name: "memory_stats",
+        label: "Memory Statistics",
+        description: "Get memory storage statistics: count, category breakdown, tier distribution, temporal types.",
+        parameters: Type.Object({
+          agent_id: Type.Optional(Type.String()),
+        }),
+        async execute(_toolCallId: string, params: { agent_id?: string }) {
+          try {
+            const data = await worker.stats({ agent_id: params.agent_id });
+            const cats = (data as Record<string, unknown>).categories as Record<string, number> || {};
+            const tiers = (data as Record<string, unknown>).tiers as Record<string, number> || {};
+            const temp = (data as Record<string, unknown>).temporal_types as Record<string, number> || {};
+            const lines = [
+              `memories: ${(data as Record<string, unknown>).memory_count} | graph nodes: ${(data as Record<string, unknown>).graph_node_count}`,
+              `categories: ${JSON.stringify(cats)}`,
+              `tiers: ${JSON.stringify(tiers)}`,
+              `temporal: ${JSON.stringify(temp)}`,
+              `avg_importance: ${(data as Record<string, unknown>).avg_importance} | avg_confidence: ${(data as Record<string, unknown>).avg_confidence}`,
+            ];
+            return { content: [{ type: "text", text: lines.join("\n") }], details: data };
+          } catch (err) {
+            api.logger.error(`[memory-recall] stats error: ${String(err)}`);
+            return { content: [{ type: "text", text: `Stats failed: ${String(err)}` }], details: { error: String(err) } };
+          }
+        },
+      },
+      { name: "memory_stats" }
     );
 
     api.registerTool(

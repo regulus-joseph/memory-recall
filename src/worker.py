@@ -926,6 +926,67 @@ async def cmd_search(params: dict) -> dict:
     return {"results": memories, "count": len(memories)}
 
 
+async def cmd_extract(params: dict) -> dict:
+    content: str = params["content"]
+    if not content.strip():
+        return {"error": "content cannot be empty"}
+
+    result = await _llm_extract(content)
+    if not result:
+        return {"error": "LLM extraction failed", "category": "other"}
+
+    return {
+        "category": result.get("category", "other"),
+        "importance": result.get("importance", 0.5),
+        "confidence": result.get("confidence", 0.5),
+        "temporal_type": result.get("temporal_type", "static"),
+        "who": result.get("who", ""),
+        "what": result.get("what", content[:50]),
+        "when": result.get("when", ""),
+        "where": result.get("where", ""),
+        "why": result.get("why", ""),
+        "how": result.get("how", ""),
+        "summary": content[:80],
+    }
+
+
+async def cmd_reset(params: dict) -> dict:
+    agent_id: str = params.get("agent_id") or "default"
+    force: bool = params.get("force", False)
+
+    if not force:
+        return {"reset": False, "error": "pass force:true to confirm"}
+
+    try:
+        table = _agent_table(agent_id)
+        all_rows = table.search().where(f'scope = "{agent_id}"').limit(100000).to_list()
+        ids = [r["id"] for r in all_rows]
+        deleted = 0
+        for mid in ids:
+            try:
+                table.delete(f'id = "{mid}"')
+                deleted += 1
+            except Exception as e:
+                log.warning(f"[reset] delete {mid[:8]} failed: {e}")
+        log.info(f"[reset] agent={agent_id} deleted={deleted}")
+
+        try:
+            graph = _get_graph(agent_id)
+            graph.clear()
+        except Exception:
+            pass
+
+        if agent_id in _lance_instances:
+            del _lance_instances[agent_id]
+        if agent_id in _graph_instances:
+            del _graph_instances[agent_id]
+
+        return {"reset": True, "deleted": deleted, "agent_id": agent_id}
+    except Exception as e:
+        log.warning(f"[reset] failed: {e}")
+        return {"reset": False, "error": str(e)}
+
+
 async def cmd_update(params: dict) -> dict:
     memory_id: str = params["memory_id"]
     new_content: str | None = params.get("content")
@@ -1493,22 +1554,55 @@ async def cmd_decay_scan(params: dict) -> dict:
 async def cmd_stats(params: dict) -> dict:
     agent_id: str | None = params.get("agent_id")
 
-    if agent_id:
+    def _agent_stats(table, graph, aid):
         try:
-            table = _agent_table(agent_id)
-            count = table.count_rows()
+            rows = table.search().where(f'scope = "{aid}"').limit(100000).to_list()
         except Exception:
-            count = 0
-        graph = _get_graph(agent_id)
+            rows = []
+        count = len(rows)
+        categories: dict[str, int] = {}
+        tiers: dict[str, int] = {"core": 0, "working": 0, "peripheral": 0, "unknown": 0}
+        temporal: dict[str, int] = {"static": 0, "dynamic": 0}
+        total_importance = 0.0
+        total_confidence = 0.0
+        total_access = 0
+        for r in rows:
+            cat = r.get("category", "other")
+            categories[cat] = categories.get(cat, 0) + 1
+            imp = float(r.get("importance", 0.5))
+            total_importance += imp
+            total_confidence += float(r.get("confidence", 0.5))
+            total_access += int(r.get("access_count", 0) or 0)
+            if imp >= 0.7:
+                tiers["core"] = tiers.get("core", 0) + 1
+            elif imp >= 0.4:
+                tiers["working"] = tiers.get("working", 0) + 1
+            else:
+                tiers["peripheral"] = tiers.get("peripheral", 0) + 1
+            tt = r.get("temporal_type", "static")
+            temporal[tt] = temporal.get(tt, 0) + 1
+        n = count or 1
         return {
             "memory_count": count,
-            "bm25_doc_count": count,
-            "lance_doc_count": count,
             "graph_node_count": graph.node_count(),
+            "categories": categories,
+            "tiers": tiers,
+            "temporal_types": temporal,
+            "avg_importance": round(total_importance / n, 3),
+            "avg_confidence": round(total_confidence / n, 3),
+            "total_access_count": total_access,
         }
+
+    if agent_id:
+        table = _agent_table(agent_id)
+        graph = _get_graph(agent_id)
+        return _agent_stats(table, graph, agent_id)
 
     total_lance = 0
     total_graph = 0
+    all_cats: dict[str, int] = {}
+    all_tiers: dict[str, int] = {"core": 0, "working": 0, "peripheral": 0}
+    all_temporal: dict[str, int] = {}
     for subdir in DATA_DIR.iterdir():
         if not subdir.is_dir():
             continue
@@ -1517,7 +1611,20 @@ async def cmd_stats(params: dict) -> dict:
             try:
                 db = lancedb.connect(str(subdir))
                 tbl = db.open_table("memories")
-                total_lance += tbl.count_rows()
+                rows = tbl.search().where(f'scope = "{subdir.name}"').limit(100000).to_list()
+                total_lance += len(rows)
+                for r in rows:
+                    cat = r.get("category", "other")
+                    all_cats[cat] = all_cats.get(cat, 0) + 1
+                    imp = float(r.get("importance", 0.5))
+                    if imp >= 0.7:
+                        all_tiers["core"] = all_tiers.get("core", 0) + 1
+                    elif imp >= 0.4:
+                        all_tiers["working"] = all_tiers.get("working", 0) + 1
+                    else:
+                        all_tiers["peripheral"] = all_tiers.get("peripheral", 0) + 1
+                    tt = r.get("temporal_type", "static")
+                    all_temporal[tt] = all_temporal.get(tt, 0) + 1
             except Exception:
                 pass
         graph_path = subdir / "graph.json"
@@ -1530,9 +1637,10 @@ async def cmd_stats(params: dict) -> dict:
 
     return {
         "memory_count": total_lance,
-        "bm25_doc_count": total_lance,
-        "lance_doc_count": total_lance,
         "graph_node_count": total_graph,
+        "categories": all_cats,
+        "tiers": all_tiers,
+        "temporal_types": all_temporal,
     }
 
 
@@ -1552,6 +1660,8 @@ METHODS = {
     "browse": cmd_browse,
     "list": cmd_list,
     "search": cmd_search,
+    "extract": cmd_extract,
+    "reset": cmd_reset,
     "update": cmd_update,
     "stats": cmd_stats,
     "compact": cmd_compact,
