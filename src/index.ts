@@ -232,6 +232,29 @@ class WorkerClient {
     return this.call("forget", params);
   }
 
+  async get(params: { memory_id: string; agent_id?: string }, _sessionId?: string): Promise<Record<string, unknown>> {
+    return this.call("get", params);
+  }
+
+  async browse(params: {
+    conversation_id?: string;
+    agent_id?: string;
+    since?: string;
+    until?: string;
+    limit?: number;
+    summary_only?: boolean;
+  }, _sessionId?: string): Promise<{
+    memories?: Array<Record<string, unknown>>;
+    conversations?: Array<Record<string, unknown>>;
+    count?: number;
+    total_memories?: number;
+    conversation_id?: string;
+    agent_id?: string;
+    error?: string;
+  }> {
+    return this.call("browse", params);
+  }
+
   async update(params: {
     memory_id: string;
     content?: string;
@@ -345,6 +368,29 @@ class PoolWorkerClient {
 
   async forget(params: { memory_id: string }, sessionId?: string): Promise<{ memory_id: string; deleted: boolean }> {
     return this._call("forget", params, sessionId);
+  }
+
+  async get(params: { memory_id: string; agent_id?: string }, sessionId?: string): Promise<Record<string, unknown>> {
+    return this._call("get", params, sessionId);
+  }
+
+  async browse(params: {
+    conversation_id?: string;
+    agent_id?: string;
+    since?: string;
+    until?: string;
+    limit?: number;
+    summary_only?: boolean;
+  }, sessionId?: string): Promise<{
+    memories?: Array<Record<string, unknown>>;
+    conversations?: Array<Record<string, unknown>>;
+    count?: number;
+    total_memories?: number;
+    conversation_id?: string;
+    agent_id?: string;
+    error?: string;
+  }> {
+    return this._call("browse", params, sessionId);
   }
 
   async update(params: {
@@ -612,6 +658,112 @@ const memoryRecallPlugin = {
         },
       },
       { name: "memory_forget" }
+    );
+
+    api.registerTool(
+      {
+        name: "memory_get",
+        label: "Get Memory",
+        description: "Retrieve a specific memory by its exact ID. Returns full memory details.",
+        parameters: Type.Object({
+          memory_id: Type.String({ description: "The exact memory ID to retrieve" }),
+          agent_id: Type.Optional(Type.String()),
+        }),
+        async execute(_toolCallId: string, params: { memory_id: string; agent_id?: string }) {
+          try {
+            const data = await (worker as unknown as { get: Function }).get({ memory_id: params.memory_id, agent_id: params.agent_id });
+            if (!(data as Record<string, unknown>).found) {
+              return {
+                content: [{ type: "text", text: `Memory ${params.memory_id} not found.` }],
+                details: data,
+              };
+            }
+            const d = data as Record<string, unknown>;
+            return {
+              content: [{
+                type: "text",
+                text: `[${d.category}][importance: ${d.importance}] ${d.content}\nID: ${d.id} | stored: ${d.stored_at}`,
+              }],
+              details: data,
+            };
+          } catch (err) {
+            api.logger.error(`[memory-recall] get error: ${String(err)}`);
+            return {
+              content: [{ type: "text", text: `Failed to get memory: ${String(err)}` }],
+              details: { error: String(err) },
+            };
+          }
+        },
+      },
+      { name: "memory_get" }
+    );
+
+    api.registerTool(
+      {
+        name: "memory_browse",
+        label: "Browse Memories",
+        description: "Browse memories by conversation/project or time range. Returns conversation-contextual view with summaries — use when user wants to review everything about a project, topic, or time period.",
+        parameters: Type.Object({
+          conversation_id: Type.Optional(Type.String({ description: "Conversation/project ID to browse" })),
+          agent_id: Type.Optional(Type.String()),
+          since: Type.Optional(Type.String({ description: "ISO timestamp — fetch memories after this time" })),
+          until: Type.Optional(Type.String({ description: "ISO timestamp — fetch memories before this time" })),
+          limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 200, default: 50 })),
+          summary_only: Type.Optional(Type.Boolean({ description: "If true, return conversation summaries instead of full memories" })),
+        }),
+        async execute(_toolCallId: string, params: {
+          conversation_id?: string; agent_id?: string; since?: string; until?: string; limit?: number; summary_only?: boolean;
+        }) {
+          try {
+            const data = await (worker as unknown as { browse: Function }).browse({
+              conversation_id: params.conversation_id,
+              agent_id: params.agent_id,
+              since: params.since,
+              until: params.until,
+              limit: params.limit,
+              summary_only: params.summary_only,
+            });
+            const d = data as Record<string, unknown>;
+            if (d.error) {
+              return {
+                content: [{ type: "text", text: `Browse failed: ${d.error}` }],
+                details: data,
+              };
+            }
+            if (params.summary_only && d.conversations) {
+              const convs = d.conversations as Array<Record<string, unknown>>;
+              const lines = convs.map((c) =>
+                `• [${c.conversation_id}] ${c.count} memories | cats: ${JSON.stringify(c.categories)} | last: ${c.last_at}`
+              );
+              return {
+                content: [{
+                  type: "text",
+                  text: `Found ${convs.length} conversations:\n${lines.join("\n")}`,
+                }],
+                details: data,
+              };
+            }
+            const mems = (d.memories as Array<Record<string, unknown>>) || [];
+            const lines = mems.map((m) =>
+              `[${m.category}][${m.stored_at}] ${String(m.content).slice(0, 100)}`
+            );
+            return {
+              content: [{
+                type: "text",
+                text: `Found ${mems.length} memories:\n${lines.join("\n")}`,
+              }],
+              details: data,
+            };
+          } catch (err) {
+            api.logger.error(`[memory-recall] browse error: ${String(err)}`);
+            return {
+              content: [{ type: "text", text: `Failed to browse memories: ${String(err)}` }],
+              details: { error: String(err) },
+            };
+          }
+        },
+      },
+      { name: "memory_browse" }
     );
 
     api.registerTool(

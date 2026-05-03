@@ -33,17 +33,11 @@ from typing import Any
 log = logging.getLogger("pool-router")
 
 _worker_bin = Path(__file__).resolve().parent / "src" / "worker.py"
-_python_bin = sys.executable
-if not _python_bin or "python3.10" in _python_bin:
-    for candidate in ["/usr/bin/python3.12", "/home/marlon-wei/bin/python3", "python3"]:
-        import shutil
-        if shutil.which(candidate):
-            test_result = __import__("subprocess").run(
-                [candidate, "-c", "import httpx"], capture_output=True
-            )
-            if test_result.returncode == 0:
-                _python_bin = candidate
-                break
+_python_bin = (
+    Path.home() / ".memory-recall-venv" / "bin" / "python"
+    if (Path.home() / ".memory-recall-venv" / "bin" / "python").exists()
+    else sys.executable
+)
 
 DEFAULT_POOL_SIZE = 3
 DEFAULT_BASE_PORT = 18801

@@ -195,12 +195,13 @@ def _agent_table(agent_id: str) -> "lancedb.table.LanceTable":
 
 def _migrate_schema(table: "lancedb.table.LanceTable") -> None:
     try:
-        schema_names = {f.name for f in table.schema()}
+        schema_names = {f.name for f in table.schema}
     except Exception:
         return
     needed = {
         "compaction_rounds", "last_compacted_at", "original_source_count",
         "who", "when", "where", "why", "how", "summary", "confidence",
+        "access_count", "last_accessed_at", "temporal_type",
     }
     missing = needed - schema_names
     if not missing:
@@ -227,6 +228,12 @@ def _migrate_schema(table: "lancedb.table.LanceTable") -> None:
                 table.add_columns([pa.field("summary", pa.string())])
             elif col == "confidence":
                 table.add_columns([pa.field("confidence", pa.float32())])
+            elif col == "access_count":
+                table.add_columns([pa.field("access_count", pa.int32())])
+            elif col == "last_accessed_at":
+                table.add_columns([pa.field("last_accessed_at", pa.float64())])
+            elif col == "temporal_type":
+                table.add_columns([pa.field("temporal_type", pa.string())])
             log.info(f"Migrated schema: added {col}")
         except Exception as e:
             log.warning(f"Schema migration failed for {col}: {e}")
@@ -652,6 +659,160 @@ async def cmd_forget(params: dict) -> dict:
 
     log.info(f"[forget] {memory_id[:8]} agent={agent_id}")
     return {"memory_id": memory_id, "deleted": True}
+
+
+async def cmd_get(params: dict) -> dict:
+    memory_id: str = params["memory_id"]
+    agent_id: str | None = params.get("agent_id")
+
+    if not agent_id:
+        agent_id = _find_agent_for_memory(memory_id)
+
+    if not agent_id:
+        return {"found": False, "error": "memory not found"}
+
+    try:
+        table = _agent_table(agent_id)
+        rows = table.search().where(f'id = "{memory_id}"').limit(1).to_list()
+        if not rows:
+            return {"found": False, "error": "memory not found in table"}
+        row = rows[0]
+        meta = {}
+        try:
+            meta = json.loads(row.get("metadata_json", "{}"))
+        except Exception:
+            pass
+        return {
+            "found": True,
+            "id": row["id"],
+            "content": row["text"],
+            "agent_id": row.get("scope", agent_id),
+            "conversation_id": row.get("conversation_id", ""),
+            "category": row.get("category", "other"),
+            "importance": float(row.get("importance", 0.5)),
+            "stored_at": row.get("stored_at", ""),
+            "timestamp": float(row.get("timestamp", 0)),
+            "who": row.get("who", ""),
+            "when": row.get("when", ""),
+            "where": row.get("where", ""),
+            "why": row.get("why", ""),
+            "how": row.get("how", ""),
+            "summary": row.get("summary", ""),
+            "confidence": float(row.get("confidence", 0.5)),
+            "temporal_type": row.get("temporal_type", "static"),
+            "access_count": int(row.get("access_count", 0) or 0),
+            "last_accessed_at": float(row.get("last_accessed_at", 0) or 0),
+            "compaction_rounds": int(row.get("compaction_rounds", 0) or 0),
+            "last_compacted_at": float(row.get("last_compacted_at", 0) or 0),
+            "original_source_count": int(row.get("original_source_count", 1) or 1),
+            "metadata": meta,
+        }
+    except Exception as e:
+        log.warning(f"[get] failed for {memory_id[:8]}: {e}")
+        return {"found": False, "error": str(e)}
+
+
+async def cmd_browse(params: dict) -> dict:
+    conversation_id: str | None = params.get("conversation_id")
+    agent_id: str = params.get("agent_id") or "default"
+    since: str | None = params.get("since")
+    until: str | None = params.get("until")
+    limit: int = params.get("limit", 50)
+    summary_only: bool = params.get("summary_only", False)
+
+    if not conversation_id and not since and not until:
+        return {"error": "provide conversation_id or time range (since/until)"}
+
+    table = _agent_table(agent_id)
+
+    conditions: list[str] = [f'scope = "{agent_id}"']
+    if conversation_id:
+        conditions.append(f'conversation_id = "{conversation_id}"')
+    if since:
+        try:
+            since_ts = datetime.fromisoformat(since.replace("Z", "+00:00")).timestamp()
+            conditions.append(f"timestamp >= {since_ts}")
+        except Exception:
+            pass
+    if until:
+        try:
+            until_ts = datetime.fromisoformat(until.replace("Z", "+00:00")).timestamp()
+            conditions.append(f"timestamp <= {until_ts}")
+        except Exception:
+            pass
+
+    where_clause = " AND ".join(conditions)
+
+    try:
+        rows = (
+            table.search()
+            .where(where_clause)
+            .limit(limit)
+            .to_list()
+        )
+    except Exception as e:
+        log.warning(f"[browse] query failed: {e}")
+        rows = []
+
+    if summary_only:
+        by_conversation: dict[str, dict] = {}
+        for row in rows:
+            cid = row.get("conversation_id", "unknown")
+            if cid not in by_conversation:
+                by_conversation[cid] = {
+                    "conversation_id": cid,
+                    "count": 0,
+                    "categories": {},
+                    "first_at": row.get("stored_at", ""),
+                    "last_at": row.get("stored_at", ""),
+                    "first_content": row.get("text", "")[:120],
+                    "last_content": row.get("text", ""),
+                    "total_importance": 0.0,
+                }
+            c = by_conversation[cid]
+            c["count"] += 1
+            cat = row.get("category", "other")
+            c["categories"][cat] = c["categories"].get(cat, 0) + 1
+            if row.get("stored_at", "") > c["last_at"]:
+                c["last_at"] = row.get("stored_at", "")
+                c["last_content"] = row.get("text", "")
+            c["total_importance"] += float(row.get("importance", 0.5))
+        return {
+            "conversations": list(by_conversation.values()),
+            "total_memories": len(rows),
+        }
+
+    memories = []
+    for row in rows:
+        meta = {}
+        try:
+            meta = json.loads(row.get("metadata_json", "{}"))
+        except Exception:
+            pass
+        memories.append({
+            "id": row["id"],
+            "content": row["text"],
+            "agent_id": row.get("scope", agent_id),
+            "conversation_id": row.get("conversation_id", ""),
+            "category": row.get("category", "other"),
+            "importance": float(row.get("importance", 0.5)),
+            "stored_at": row.get("stored_at", ""),
+            "who": row.get("who", ""),
+            "when": row.get("when", ""),
+            "where": row.get("where", ""),
+            "why": row.get("why", ""),
+            "how": row.get("how", ""),
+            "summary": row.get("summary", ""),
+            "confidence": float(row.get("confidence", 0.5)),
+            **meta,
+        })
+
+    return {
+        "memories": memories,
+        "count": len(memories),
+        "conversation_id": conversation_id,
+        "agent_id": agent_id,
+    }
 
 
 async def cmd_update(params: dict) -> dict:
@@ -1276,6 +1437,8 @@ METHODS = {
     "store": cmd_store,
     "recall": cmd_recall,
     "forget": cmd_forget,
+    "get": cmd_get,
+    "browse": cmd_browse,
     "update": cmd_update,
     "stats": cmd_stats,
     "compact": cmd_compact,
