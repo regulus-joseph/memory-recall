@@ -1097,7 +1097,7 @@ const memoryRecallPlugin = {
         worker.store({
           content: text,
           agent_id: event.from,
-          conversation_id: event.conversationId,
+          conversation_id: event.sessionKey ?? event.conversationId,
           metadata,
         }, sessionKey).catch(err => {
           api.logger.warn(`[memory-recall] auto-store failed: ${String(err)}`);
@@ -1133,6 +1133,7 @@ const memoryRecallPlugin = {
               const metadata = { role: "assistant" };
               worker.store({
                 content: text,
+                conversation_id: event.sessionKey ?? event.conversationId,
                 metadata,
               }, sessionKey).catch(err => {
                 api.logger.warn(`[memory-recall] agent_end store failed: ${String(err)}`);

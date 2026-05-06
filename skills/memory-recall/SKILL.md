@@ -8,6 +8,19 @@ trigger: /memory
 
 Persistent, per-agent long-term memory backed by LanceDB (vector + BM25 + graph).
 
+## Architecture
+
+Three-layer retrieval cascade (L1 → L2 → L3):
+- **L1 (vector)**: bge-m3 embedding via Ollama — semantic similarity search
+- **L2 (BM25)**: jieba keyword FTS — fast exact-match, no embedding cost
+- **L3 (graph)**: NetworkX expansion from top-L1/L2 results — finds related memories via session/category/temporal edges
+
+Retrieval → score fusion (0.5×L1 + 0.5×L2 + 0.4×L3) → ranked output.
+
+Storage: LanceDB vector table + BM25 FTS index + NetworkX graph (session edges, category overlap, temporal links).
+
+Decay engine: Weibull composite (recency × frequency × importance). Compactor: cosine clustering merges similar stale memories.
+
 ## When to Use
 
 - User asks about past conversations, decisions, or events
@@ -20,18 +33,17 @@ Persistent, per-agent long-term memory backed by LanceDB (vector + BM25 + graph)
 ## Available Tools
 
 ### memory_recall
-Semantic hybrid recall: vector + BM25 + graph cascade. Best for natural language queries.
+Semantic hybrid recall: L1 vector + L2 BM25 + L3 graph cascade. Best for natural language queries.
 ```
 query: "what did the user tell me about their project deadline"
 max_results: 3
+min_score: 0.15   # filter low-relevance results (default 0, recommended 0.15-0.2)
 ```
-Returns scored memories with relevance scores. Access count is tracked.
+Returns scored memories with layer info. Access count is tracked — frequently recalled memories resist decay.
 
 ### memory_browse
-Browse memories by conversation/project or time range. Best for reviewing a whole project context.
+Browse memories by time range. conversation_id is auto-set via sessionKey (stable across gateway restarts).
 ```
-conversation_id: "proj-alpha-2026"
-# OR time range:
 since: "2026-04-01T00:00:00"
 until: "2026-05-01T00:00:00"
 summary_only: true  # conversation summaries instead of full list
@@ -49,11 +61,11 @@ limit: 20
 Paginated memory listing with filters.
 ```
 category: "events"  # optional filter
-conversation_id: "proj-alpha"  # optional
 sort: "desc"  # or "asc"
 limit: 20
 offset: 0
 ```
+Note: conversation_id filtering uses sessionKey format (e.g. sessionKeys are auto-assigned per openclaw session).
 
 ### memory_get
 Retrieve exact memory by ID.
@@ -68,10 +80,10 @@ content: "用户告诉我他们下周要去深圳出差"
 ```
 
 ### memory_store
-Store a memory. Auto-extracts category, importance, 6W entities.
+Store a memory. Auto-extracts category, importance, 6W entities. Auto-assigns sessionKey as conversation_id.
 ```
 content: "用户计划5月15日去深圳出差3天"
-conversation_id: "proj-alpha"  # optional
+conversation_id: "proj-alpha"  # optional, auto-set if omitted
 metadata: {}  # optional extra metadata
 ```
 
@@ -90,7 +102,7 @@ memory_id: "abc-123-..."
 ```
 
 ### memory_stats
-Storage statistics: count, categories, tiers, temporal types.
+Storage statistics: count, categories, tiers, temporal types, avg importance/confidence.
 ```
 agent_id: "default"  # optional, omit for global
 ```
@@ -119,19 +131,12 @@ Memories are auto-classified by importance:
 - **working** (0.4–0.7): normal priority
 - **peripheral** (< 0.4): first to be pruned by decay scan
 
-## Architecture
-
-- LanceDB: vector + BM25 storage (`~/.memory-recall/data/{agent_id}/`)
-- NetworkX graph: conversation edges, category overlap, temporal links
-- bge-m3 embedding via Ollama
-- LLM extraction: qwen2.5:7b via Ollama
-- Decay engine: Weibull composite score (recency + frequency + importance)
-- Compactor: cosine clustering merges similar stale memories
-
 ## Tips
 
 - Store memories with conversation_id to enable `memory_browse` by project
 - Use `memory_extract` before `memory_store` to preview what category/importance the system assigns
 - `memory_recall` tracks access_count — frequently recalled memories resist decay
 - `memory_browse` with `summary_only: true` is best for getting project overviews fast
+- Set `min_score: 0.15` in recall to filter out low-relevance cross-talk noise
+- `sessionKey` (not gateway's conversationId) is used as conversation_id — stable across gateway restarts
 - Decay scan runs every 24h (configurable via decayIntervalHours) and protects core memories

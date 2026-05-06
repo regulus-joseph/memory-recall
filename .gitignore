@@ -31,3 +31,4 @@ tests/
 *.patch
 code.patch
 memory-recall.patch
+*.code-workspace
