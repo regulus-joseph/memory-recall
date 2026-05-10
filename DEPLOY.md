@@ -2,7 +2,7 @@
 
 > 适用环境：Win11 + WSL2 (Ubuntu)
 > 目标用户：个人开发者
-> 当前版本：v2.5 (LanceDB + worker 架构)
+> 当前版本：v0.5.0 (LanceDB + worker 架构 + HTTP pool 模式)
 
 ---
 
@@ -48,6 +48,24 @@ python3.12 -m venv ~/.memory-recall-venv
 ```bash
 cd ~/projects/memory-recall
 openclaw plugins install --link . --dangerously-force-unsafe-install
+```
+
+### 传输模式选择
+
+**stdio 模式（默认）**：单 Gateway 进程内通过 subprocess 通信
+```bash
+# 默认即为 stdio 模式
+openclaw gateway restart
+```
+
+**HTTP pool 模式**：支持多会话并发，需要先启动 pool_router.py
+```bash
+# 终端1: 启动 pool router
+cd ~/projects/memory-recall
+~/.memory-recall-venv/bin/python pool_router.py &
+
+# 终端2: 启动 gateway（启用 pool 模式）
+USE_HTTP_POOL=1 openclaw gateway restart
 ```
 
 ---
