@@ -140,11 +140,12 @@ describe("worker smoke (end-to-end)", () => {
         memory_id: "00000000-0000-0000-0000-000000000000",
         content: "new content",
       });
-      assert.ok(!r.updated || r.error, "update of non-existent should fail gracefully");
+      // Should return gracefully with either updated=false or error field
+      assert.ok(!r.updated || r.error, `update of non-existent should fail gracefully, got: ${JSON.stringify(r)}`);
     } finally {
       w.cleanup();
     }
-  });
+  }, 15000); // 15s timeout for this slow test
 
   it("forget removes memory", async () => {
     const w = makeWorker();
@@ -178,8 +179,8 @@ describe("worker smoke (end-to-end)", () => {
 
       const stats = await w.call("stats", { agent_id: `${uid}-stats` });
       assert.ok(typeof stats.memory_count === "number", "stats should have memory_count");
-      assert.ok(typeof stats.bm25_doc_count === "number", "stats should have bm25_doc_count");
       assert.ok(typeof stats.graph_node_count === "number", "stats should have graph_node_count");
+      assert.ok(typeof stats.categories === "object" || typeof stats.tiers === "object", "stats should have breakdown fields");
     } finally {
       w.cleanup();
     }

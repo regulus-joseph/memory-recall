@@ -20,12 +20,19 @@ graphify-out/cache/
 .graphify_ast.json
 .graphify_detect.json
 
+# Graph outputs (generated, large)
+graph.html
+graph.json
+
 # LanceDB data (per-agent)
 ~/.memory-recall/
 
 # Test files (bundled separately for development)
 tests/
 *.test.mjs
+
+# Claude Code settings (local config, not for repo)
+.claude/
 
 # Development artifacts
 *.patch

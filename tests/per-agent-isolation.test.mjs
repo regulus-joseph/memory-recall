@@ -145,9 +145,9 @@ describe("per-agent isolation", () => {
       const alphaStats = await w.call("stats", { agent_id: `${uid}-stats-alpha` });
       const betaStats = await w.call("stats", { agent_id: `${uid}-stats-beta` });
 
-      assert.strictEqual(alphaStats.bm25_doc_count, 2, `${uid}-stats-alpha should have 2 memories, got ${alphaStats.bm25_doc_count}`);
+      assert.strictEqual(alphaStats.memory_count, 2, `${uid}-stats-alpha should have 2 memories, got ${alphaStats.memory_count}`);
       assert.strictEqual(alphaStats.graph_node_count, 2, "graph should have 2 nodes");
-      assert.strictEqual(betaStats.bm25_doc_count, 1, `${uid}-stats-beta should have 1 memory`);
+      assert.strictEqual(betaStats.memory_count, 1, `${uid}-stats-beta should have 1 memory`);
       assert.strictEqual(betaStats.graph_node_count, 1, "graph should have 1 node");
     } finally {
       w.cleanup();

@@ -68,7 +68,7 @@ describe("worker concurrency", { concurrency: 1 }, () => {
       assert.ok(r1.memory_id !== r3.memory_id);
 
       const stats = await w.call("stats", { agent_id: `${uid}-seq` });
-      assert.ok(stats.bm25_doc_count >= 3, `Expected >= 3 docs, got ${stats.bm25_doc_count}`);
+      assert.ok(stats.memory_count >= 3, `Expected >= 3 docs, got ${stats.memory_count}`);
     } finally {
       w.cleanup();
     }

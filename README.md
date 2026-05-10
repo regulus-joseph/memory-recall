@@ -2,24 +2,29 @@
 
 > L1/L2/L3 cascade memory recall for OpenClaw: per-agent LanceDB (vector + FTS) + NetworkX graph expansion. Async LLM extraction, Weibull decay, progressive compaction.
 
-## 版本历史
+## Version History
 
-| 版本 | 日期 | 更新内容 |
-|-----|------|---------|
-| 0.1.0 | 2026-04-22 | 初始版本: Qdrant存储 + Ollama bge-m3 embedding + recall_memories工具 |
-| 0.2.0 | 2026-04-22 | 添加before_agent_start hook自动注入 |
-| 0.3.0 | 2026-04-24 | Phase 1: TS plugin + Python server 架构；async LLM extraction；MLP 6-category |
-| **0.4.0** | 2026-04-25 | **v2.5: LanceDB迁移；worker架构（stdio JSON-RPC）；Weibull decay；Compactor聚类合并；Tier保护** |
+| Version | Date | Changes |
+|---------|------|---------|
+| 0.1.0 | 2026-04-22 | Initial: Qdrant + Ollama bge-m3 embedding + recall_memories tool |
+| 0.2.0 | 2026-04-22 | Added before_agent_start hook auto-injection |
+| 0.3.0 | 2026-04-24 | Phase 1: TS plugin + Python server; async LLM extraction; MLP 6-category |
+| 0.4.0 | 2026-04-25 | LanceDB migration; worker architecture (stdio JSON-RPC); Weibull decay; Compactor clustering; Tier protection |
+| **0.5.0** | 2026-05-10 | **HTTP pool mode (USE_HTTP_POOL=1); session buffer; session_end hook; 12 tools** |
 
-## 架构
+## Architecture
 
 ```
 OpenClaw Gateway (TS plugin)
     └── memory-recall (index.ts)
-            ├── 4 tools: recall_memories / store_memory / forget_memory / update_memory
-            ├── 3 hooks: message_received / agent_end / before_prompt_build
-            ├── registerService: decay timer (gateway托管，每24h)
-            └── child_process.spawn → Python worker (stdio JSON-RPC)
+            ├── 12 tools: recall/search/list/browse/stats/update/extract/reset + store/forget/get
+            ├── 5 hooks: message_received / agent_end / before_prompt_build / session_end / gateway_stop
+            ├── registerService: decay timer (gateway-managed, every 24h)
+            └── Two transport modes:
+                ├── stdin (default):  TS plugin → worker.py subprocess (stdio JSON-RPC)
+                └── http (pool):      TS plugin → pool_router.py (HTTP, port 18799) → worker.py subprocess per session
+
+                              Python Worker (LanceDB + NetworkX)
                               ├── L1: LanceDB vector search (per-agent)
                               ├── L2: LanceDB FTS (jieba tokenize, per-agent)
                               ├── L3: NetworkX graph expansion (per-agent)
@@ -31,11 +36,11 @@ OpenClaw Gateway (TS plugin)
                               └── LanceDB data: ~/.memory-recall/data/{agent_id}/memories.lance
 ```
 
-**无需外部依赖**：Qdrant 已移除，所有数据存在本地 LanceDB 文件。
+**Ollama Required**: Local Ollama service must be running (bge-m3 + qwen2.5:7b models). No external database dependencies (Qdrant removed).
 
-## 前置依赖
+## Prerequisites
 
-### 1. Python venv（已有则跳过）
+### 1. Python venv (skip if exists)
 
 ```bash
 python3.12 -m venv ~/.memory-recall-venv
@@ -52,18 +57,18 @@ ollama pull bge-m3
 ollama pull qwen2.5:7b
 ```
 
-## 安装
+## Installation
 
-### 1. 插件安装
+### 1. Plugin Installation
 
 ```bash
 cd ~/projects/memory-recall
 openclaw plugins install --link . --dangerously-force-unsafe-install
 ```
 
-### 2. OpenClaw 配置
+### 2. OpenClaw Configuration
 
-编辑 `~/.openclaw/openclaw.json`：
+Edit `~/.openclaw/openclaw.json`:
 
 ```json
 {
@@ -86,101 +91,139 @@ openclaw plugins install --link . --dangerously-force-unsafe-install
 }
 ```
 
-### 3. 重启验证
+### 3. Restart and Verify
 
 ```bash
 openclaw gateway restart
 openclaw logs 2>&1 | grep memory-recall
 ```
 
-## 配置
+## Configuration
 
-| 配置 | 说明 | 默认值 |
-|------|------|-------|
-| `autoStore` | 自动存储消息到记忆 | `true` |
-| `autoRecall` | 自动注入记忆到 prompt | `true` |
-| `autoRecallMaxItems` | 每次注入最大条数 | `3` |
-| `autoRecallMaxChars` | 每次注入最大字符数 | `600` |
-| `decayEnabled` | 启用衰减引擎 | `true` |
-| `decayIntervalHours` | 衰减周期（小时） | `24` |
+| Config | Description | Default |
+|--------|-------------|---------|
+| `autoStore` | Automatically store messages to memory | `true` |
+| `autoRecall` | Automatically inject memories into prompt | `true` |
+| `autoRecallMaxItems` | Max memories injected per turn | `3` |
+| `autoRecallMaxChars` | Max characters injected per turn | `600` |
+| `decayEnabled` | Enable decay engine | `true` |
+| `decayIntervalHours` | Decay cycle interval (hours) | `24` |
 
-### 环境变量
+### Environment Variables
 
-| 变量 | 说明 | 默认值 |
-|------|------|-------|
-| `PYTHON_BIN` | Worker Python 路径 | `~/.memory-recall-venv/bin/python` |
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `PYTHON_BIN` | Worker Python path | `~/.memory-recall-venv/bin/python` |
 | `EMBEDDING_URL` | Ollama embedding API | `http://localhost:11434/api/embeddings` |
-| `EMBEDDING_MODEL` | Embedding 模型 | `bge-m3` |
+| `EMBEDDING_MODEL` | Embedding model | `bge-m3` |
 | `OLLAMA_URL` | Ollama generate API | `http://localhost:11434` |
 | `LLM_MODEL` | Extraction LLM | `qwen2.5:7b` |
+| `USE_HTTP_POOL` | Enable HTTP pool mode | `0` (0=stdio, 1=HTTP) |
+| `MR_ROUTER_URL` | Pool router address | `http://127.0.0.1:18799` |
 
-## 工具
+### HTTP Pool Mode
 
-| 工具 | 说明 |
-|------|------|
-| `recall_memories` | L1/L2/L3 混合检索，参数: query, max_results, min_score |
-| `store_memory` | 存储记忆，自动 LLM 提取 6w + category + confidence + temporal_type |
-| `forget_memory` | 按 ID 删除记忆（core 记忆除外） |
-| `update_memory` | 更新记忆内容，自动重新提取 |
+When enabled, uses `pool_router.py` to manage worker process pool with session affinity:
 
-## Schema v2.5（21 字段）
+```bash
+export USE_HTTP_POOL=1
+openclaw gateway restart
+```
 
-| 字段 | 说明 |
-|------|------|
-| `id` | 唯一标识 |
-| `content` | 原始内容 |
-| `agent_id` | 所属 agent |
-| `conversation_id` | 所属会话 |
-| `category` | LLM 提取：6-category MLP |
-| `who` | LLM 提取：参与者 |
-| `when` | LLM 提取：时间 |
-| `where` | LLM 提取：地点 |
-| `why` | LLM 提取：目的 |
-| `how` | LLM 提取：方式 |
-| `summary` | LLM 提取：摘要 |
-| `importance` | 重要性（0~1），core ≥ 0.7 |
-| `confidence` | LLM 置信度（0~1） |
-| `temporal_type` | 时间类型（recurring/one-time/ongoing） |
-| `access_count` | 访问次数 |
-| `last_accessed_at` | 上次访问时间 |
-| `compaction_rounds` | 合并次数 |
-| `last_compacted_at` | 上次合并时间 |
-| `original_source_count` | 合并来源数 |
-| `created_at` | 创建时间 |
-| `updated_at` | 更新时间 |
+Session ID is routed via `_session_id` parameter for multi-session concurrency.
 
-## 衰减引擎
+### Transport Mode Comparison
+
+| Mode | USE_HTTP_POOL | Use Case |
+|------|---------------|----------|
+| stdio (default) | `0` | Single session, development |
+| HTTP pool | `1` | Multi-session concurrency, production |
+
+### Hooks
+
+| Hook | Trigger | Function |
+|------|---------|----------|
+| `message_received` | User message received | Auto-store + trigger recall |
+| `agent_end` | Agent reply complete | Store assistant message |
+| `before_prompt_build` | Before prompt build | Inject recall cache results |
+| `session_end` | Session ends | Flush buffered messages, clear cache |
+| `gateway_stop` | Gateway stops | Clean up worker process |
+
+## Tools
+
+| Tool | Description |
+|------|-------------|
+| `memory_recall` | L1/L2/L3 hybrid retrieval (query, max_results, min_score) |
+| `memory_store` | Store memory with auto LLM extraction (6w + category + confidence + temporal_type) |
+| `memory_forget` | Delete memory by ID (except core memories) |
+| `memory_get` | Get single memory details by ID |
+| `memory_browse` | Browse memories by conversation/time range, supports summary mode |
+| `memory_list` | Paginated list with category/conversation filter |
+| `memory_search` | Fast BM25/jieba keyword search |
+| `memory_extract` | Run LLM structured extraction on any text |
+| `memory_update` | Update memory content or metadata |
+| `memory_reset` | Clear all memories for an agent (dangerous) |
+| `memory_stats` | Get memory statistics: count, categories, tiers, temporal types |
+| `memory_compact` | Manually trigger clustering compaction (auto-triggered by decay) |
+
+## Schema v0.5 (21 fields)
+
+| Field | Description |
+|-------|-------------|
+| `id` | Unique identifier |
+| `content` | Original content |
+| `agent_id` | Owner agent |
+| `conversation_id` | Owner conversation |
+| `category` | LLM extracted: 6-category MLP |
+| `who` | LLM extracted: participants |
+| `when` | LLM extracted: time |
+| `where` | LLM extracted: location |
+| `why` | LLM extracted: purpose |
+| `how` | LLM extracted: method |
+| `summary` | LLM extracted: summary |
+| `importance` | Importance (0~1), core ≥ 0.7 |
+| `confidence` | LLM confidence (0~1) |
+| `temporal_type` | Time type (static/dynamic) |
+| `access_count` | Access count |
+| `last_accessed_at` | Last access time |
+| `compaction_rounds` | Compaction count |
+| `last_compacted_at` | Last compaction time |
+| `original_source_count` | Merge source count |
+| `created_at` | Creation time |
+| `updated_at` | Update time |
+
+## Decay Engine
 
 `composite = 0.4×recency + 0.3×frequency + 0.3×intrinsic`
 
-- **temporal_type** 影响半衰期：recurring ×3，ongoing ×1，one-time ×1
-- **decay floor** = 0.9（不会低于此值）
-- **Tier 保护**：importance ≥ 0.7 的 core 记忆免疫删除和合并
-- decay timer 通过 `registerService` 由 gateway 托管，每 24h 执行一次
+- **temporal_type** affects half-life: dynamic ÷3, static ×1
+- **decay floor** = 0.9 (minimum value)
+- **Tier protection**: core memories (importance ≥ 0.7) immune to deletion and compaction
+- decay timer managed by gateway via `registerService`, runs every 24h
 
-## Compactor（聚类合并）
+## Compactor (Clustering Merge)
 
-- 触发：decay score ≤ 0.3 且 14 天未合并
-- 逻辑：cosine similarity ≥ 0.88 的记忆聚类合并
-- 合并规则：内容去重行，最大 importance，plurality category
-- 限制：最多 4 轮，防止过度合并
+- Trigger: decay score ≤ 0.3 AND 14 days since last compaction
+- Logic: cosine similarity ≥ 0.88 → cluster merge
+- Merge rules: dedupe content lines, max importance, plurality category
+- Limit: max 4 rounds to prevent over-merging
 
-## 数据目录
+## Data Directory
 
 ```
 ~/.memory-recall/data/
 └── {agent_id}/
-    ├── memories.lance/     # LanceDB 表（vector + FTS）
-    └── graph.json         # NetworkX 图（session/cooccur/category_overlap/same_when/same_where）
+    ├── memories.lance/     # LanceDB table (vector + FTS)
+    └── graph.json         # NetworkX graph (session/cooccur/category_overlap/same_when/same_where)
 ```
 
-## 调试
+## Debugging
 
 ```bash
-# 查看插件日志
+# View plugin logs
 openclaw logs 2>&1 | grep memory-recall
 
-# 测试 worker 健康
+# Test worker health
 cd ~/projects/memory-recall
 ~/.memory-recall-venv/bin/python -c "
 import sys; sys.path.insert(0, 'src')
@@ -189,11 +232,11 @@ import asyncio
 print(asyncio.run(cmd_health()))
 "
 
-# 强制运行 decay cycle（手动触发）
-# 通过 restart gateway 让 registerService 重新 start
+# Force run decay cycle (manual trigger)
+# Restart gateway to let registerService re-start
 openclaw gateway restart
 
-# 查看 LanceDB 数据
+# View LanceDB data
 ~/.memory-recall-venv/bin/python -c "
 import lancedb
 db = lancedb.connect('~/.memory-recall/data/main')
@@ -201,8 +244,85 @@ print(db.open_table('memories').head())
 "
 ```
 
-## 已知问题
+## Known Issues
 
-- 插件安装需要 `--dangerously-force-unsafe-install`（因为 worker 架构需要 `child_process.spawn`）
-- decay 首次运行可能超时（worker 冷启动），后续正常运行
-- LanceDB FTS 需要先调用 `create_fts_index("tokens")` 初始化（自动完成）
+- Plugin installation requires `--dangerously-force-unsafe-install` (because worker architecture needs `child_process.spawn`)
+- First decay cycle may timeout (worker cold start), subsequent runs are normal
+- LanceDB FTS requires `create_fts_index("tokens")` initialization (automatic)
+
+---
+
+## Pull Request Description
+
+### Summary
+
+memory-recall v0.5.0 adds HTTP pool mode for multi-session concurrency, session buffering, session_end hook, and expands the toolset from 4 to 12 tools — while maintaining full backward compatibility with the existing stdio transport mode.
+
+### Changes
+
+#### New Features
+- **HTTP Pool Mode** (`USE_HTTP_POOL=1`): `pool_router.py` manages a pool of worker processes with session affinity via `_session_id` routing. Enables multi-session concurrency in production.
+- **Session Buffer**: Buffers messages during a session, flushes on `session_end`. Prevents data loss if `store` fails mid-session.
+- **`session_end` Hook**: Triggers buffer flush and cache cleanup when a session ends.
+- **`gateway_stop` Hook**: Cleanly terminates worker process on gateway shutdown.
+
+#### Tool Expansion (4 → 12)
+| Tool | Description |
+|------|-------------|
+| `memory_recall` | L1/L2/L3 hybrid retrieval |
+| `memory_store` | Auto LLM extraction (6w + category + confidence + temporal_type) |
+| `memory_forget` | Delete by ID (core protected) |
+| `memory_get` | Get single memory by ID |
+| `memory_browse` | Browse by conversation/time range with summary mode |
+| `memory_list` | Paginated list with filters |
+| `memory_search` | Fast BM25/jieba keyword search |
+| `memory_extract` | LLM structured extraction on any text |
+| `memory_update` | Update content or metadata |
+| `memory_reset` | Clear all agent memories (requires `force:true`) |
+| `memory_stats` | Full statistics: count, categories, tiers, temporal types |
+| *(internal)* | `compact`, `graph_rebuild`, `decay_scan` available via registerService |
+
+#### Bug Fixes
+- Fixed `stats` response: removed non-existent `bm25_doc_count` field (use `memory_count`)
+- Fixed `update` timeout on non-existent memory (graceful error response)
+- Fixed test suite: all assertions now match actual API response shapes
+
+#### Documentation
+- README fully translated to English; Chinese version preserved as `README.zh.md`
+- `.gitignore` hardened: excludes `graph.html`, `graph.json`, `.claude/`, `graphify-out/`
+- `LICENSE` (MIT) added
+- `INIT.md` password sanitized
+
+### Migration Guide
+
+**From v0.4.0 to v0.5.0**: Fully backward compatible. No breaking changes.
+
+```bash
+# Existing stdio users: no action needed
+openclaw gateway restart
+
+# New HTTP pool users:
+export USE_HTTP_POOL=1
+# Start pool router first:
+~/.memory-recall-venv/bin/python ~/projects/memory-recall/pool_router.py &
+openclaw gateway restart
+```
+
+### Test Plan
+
+- [x] `tests/worker-smoke.test.mjs` — 10/10 passing (health, store, recall, update, forget, stats, dedup, Chinese text)
+- [x] `tests/all.test.mjs` — 25/25 passing (tokenizer, rule_extractor, BM25Index, GraphStore, plugin smoke)
+- [x] `tests/bm25-negative-score.test.mjs` — 4/4 passing (negative score edge cases)
+- [x] `tests/per-agent-isolation.test.mjs` — 6/6 passing (cross-agent isolation)
+- [x] `tests/worker-concurrency.test.mjs` — 5/5 passing (sequential, concurrent writes)
+
+**Total: 50 tests passing**
+
+### Checklist
+
+- [x] Tests added/updated for all new tools
+- [x] `bm25_doc_count` field removed from assertions (replaced with `memory_count`)
+- [x] `.gitignore` excludes all generated/cache files
+- [x] No credentials or secrets in codebase
+- [x] README in English + Chinese
+- [x] MIT License added

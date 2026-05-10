@@ -177,7 +177,7 @@ memory-recall/
 
 ```bash
 # MySQL (数据导入)
-MYSQL_PASSWORD=SuRu_2026*
+# MYSQL_PASSWORD=xxx  # 请在本地 .env 文件中设置
 
 # Ollama
 OLLAMA_MODELS=/opt/ollama/models
