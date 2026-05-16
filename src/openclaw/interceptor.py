@@ -12,7 +12,7 @@ HOOK_NAME = "before_prompt_build"
 
 def register_hook(api: Any, config: dict) -> None:
     """Register the before_prompt_build hook with OpenClaw"""
-    api.on(HOOK_NAME, create_hook_handler(config))
+    api.registerHook(HOOK_NAME, create_hook_handler(config))
 
 
 def create_hook_handler(config: dict):

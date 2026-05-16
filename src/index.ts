@@ -585,14 +585,16 @@ const memoryRecallPlugin = {
   name: "Memory Recall",
   description:
     "L1/L2/L3 cascade memory recall with per-agent LanceDB, Weibull decay, and progressive compaction.",
-  kind: "memory" as const,
+  kind: "sensorium" as const,
 
   register(api: OpenClawPluginApi) {
+    console.log("[memory-recall] === REGISTER CALLED ===");
     const config = parsePluginConfig(api.pluginConfig);
+    console.log(`[memory-recall] pluginConfig keys: ${Object.keys(api.pluginConfig || {}).join(",")}`);
 
     const require = createRequire(import.meta.url);
     const pluginDir = require.resolve("./index.js").replace(/\/index\.js$/, "");
-    const workerPath = require.resolve("./worker.py").replace(/\.py$/, ".py");
+    const workerPath = pluginDir.replace(/\/dist$/, "/src") + "/worker.py";
     const pythonBin = process.env.PYTHON_BIN || PYTHON_BIN;
 
     if (_worker) {
@@ -650,7 +652,7 @@ const memoryRecallPlugin = {
 
     api.registerTool(
       {
-        name: "memory_recall",
+        name: "mr_memory_recall",
         label: "Recall Memories",
         description:
           "Search past memories using hybrid vector + BM25 + graph cascade. " +
@@ -698,12 +700,12 @@ const memoryRecallPlugin = {
           }
         },
       },
-      { name: "memory_recall" }
+      { name: "mr_memory_recall" }
     );
 
     api.registerTool(
       {
-        name: "memory_store",
+        name: "mr_memory_store",
         label: "Store Memory",
         description: "Store a piece of information in long-term memory.",
         parameters: Type.Object({
@@ -738,7 +740,7 @@ const memoryRecallPlugin = {
           }
         },
       },
-      { name: "memory_store" }
+      { name: "mr_memory_store" }
     );
 
     api.registerTool(
@@ -770,7 +772,7 @@ const memoryRecallPlugin = {
 
     api.registerTool(
       {
-        name: "memory_get",
+        name: "mr_memory_get",
         label: "Get Memory",
         description: "Retrieve a specific memory by its exact ID. Returns full memory details.",
         parameters: Type.Object({
@@ -803,7 +805,7 @@ const memoryRecallPlugin = {
           }
         },
       },
-      { name: "memory_get" }
+      { name: "mr_memory_get" }
     );
 
     api.registerTool(
@@ -921,7 +923,7 @@ const memoryRecallPlugin = {
 
     api.registerTool(
       {
-        name: "memory_search",
+        name: "mr_memory_search",
         label: "Search Memories",
         description: "Fast keyword search across all memories using BM25/jieba tokenization. Use for quick text search without embedding cost.",
         parameters: Type.Object({
@@ -957,7 +959,7 @@ const memoryRecallPlugin = {
           }
         },
       },
-      { name: "memory_search" }
+      { name: "mr_memory_search" }
     );
 
     api.registerTool(
@@ -1084,19 +1086,28 @@ const memoryRecallPlugin = {
 
     const autoStore = config.autoStore !== false;
     const autoRecall = config.autoRecall !== false;
+    api.logger.info(`[memory-recall] autoStore=${autoStore}, autoRecall=${autoRecall}`);
 
     if (autoStore) {
-      api.registerHook("message_received", async (event) => {
+      console.log("[memory-recall] *** registering message_received hook via api.registerHook ***");
+      api.registerHook("message_received", async (event, ctx) => {
+        console.log("[memory-recall] *** message_received hook HANDLER CALLED ***");
+        console.log("[memory-recall] event.from:", event.from);
+        console.log("[memory-recall] event.content type:", typeof event.content);
+        console.log("[memory-recall] event.content:", JSON.stringify(event.content)?.slice(0, 200));
+        api.logger.info(`[memory-recall] message_received hook FIRED, text length: ${event.content?.length ?? 0}`);
         const text = extractText(event.content);
         if (!text || text.length < 10) return;
+        api.logger.info(`[memory-recall] storing message, length: ${text.length}`);
 
-        const sessionKey = event.sessionKey ?? event.from ?? "default";
+        const sessionKey = event.sessionKey ?? ctx?.sessionKey ?? event.from ?? "default";
+        const agentId = event.from || ctx?.sessionKey?.split(":")[1] || "default";
         const maxResults = config.autoRecallMaxItems ?? 3;
 
-        const metadata = { role: "user", sender: event.from, channel_id: event.channelId };
+        const metadata = { role: "user", sender: event.from, channel_id: event.channelId, ctx_session_key: ctx?.sessionKey };
         worker.store({
           content: text,
-          agent_id: event.from,
+          agent_id: agentId,
           conversation_id: event.sessionKey ?? event.conversationId,
           metadata,
         }, sessionKey).catch(err => {
@@ -1149,7 +1160,7 @@ const memoryRecallPlugin = {
     }
 
     if (autoRecall) {
-      api.on("before_prompt_build", async (params: { sessionMessages?: string[]; userMessage?: string }, ctx) => {
+      api.registerHook("before_prompt_build", async (params: { sessionMessages?: string[]; userMessage?: string }, ctx) => {
         const userMessage = params?.userMessage || "";
         if (!userMessage || userMessage.length < 3) return { prependContext: "" };
 
