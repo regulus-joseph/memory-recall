@@ -1090,7 +1090,7 @@ const memoryRecallPlugin = {
 
     if (autoStore) {
       console.log("[memory-recall] *** registering message_received hook via api.registerHook ***");
-      api.registerHook("message_received", async (event, ctx) => {
+      api.on("message_received", async (event, ctx) => {
         console.log("[memory-recall] *** message_received hook HANDLER CALLED ***");
         console.log("[memory-recall] event.from:", event.from);
         console.log("[memory-recall] event.content type:", typeof event.content);
