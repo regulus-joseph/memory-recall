@@ -1,6 +1,6 @@
 {
   "name": "memory-recall",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "type": "module",
   "description": "L1/L2/L3 memory recall plugin for OpenClaw with per-agent LanceDB storage, Weibull decay, and progressive compaction",
   "main": "src/index.ts",
@@ -25,23 +25,49 @@
   },
   "changelog": [
     {
-  "version": "0.5.0",
+      "version": "0.5.0",
+      "date": "2026-05-10",
+      "changes": [
+        "HTTP pool mode (USE_HTTP_POOL=1) with session affinity",
+        "Session buffer with session_end hook flush",
+        "12 tools (expanded from 4)",
+        "Gateway-stop hook for clean worker shutdown"
+      ]
+    },
+    {
+      "version": "0.4.0",
+      "date": "2026-04-25",
+      "changes": [
+        "LanceDB migration",
+        "Worker architecture (stdio JSON-RPC)",
+        "Weibull decay engine",
+        "Compactor clustering",
+        "Tier protection (core memories)"
+      ]
+    },
+    {
+      "version": "0.3.0",
+      "date": "2026-04-24",
+      "changes": [
+        "TS plugin + Python server",
+        "Async LLM extraction",
+        "MLP 6-category classification"
+      ]
+    },
+    {
+      "version": "0.2.0",
       "date": "2026-04-22",
       "changes": [
-        "添加before_agent_start hook自动注入功能",
-        "修复tools.byProvider配置使recall_memories工具对agent可见",
-        "添加TypeBox参数校验"
+        "before_agent_start hook auto-injection"
       ]
     },
     {
       "version": "0.1.0",
       "date": "2026-04-22",
       "changes": [
-        "初始版本",
-        "Qdrant向量存储",
-        "Ollama bge-m3 embedding",
-        "recall_memories工具",
-        "message_received/agent_end自动存储"
+        "Initial: Qdrant + Ollama bge-m3 embedding",
+        "recall_memories tool",
+        "message_received/agent_end auto-store"
       ]
     }
   ]

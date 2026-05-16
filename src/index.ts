@@ -591,7 +591,7 @@ const memoryRecallPlugin = {
     const config = parsePluginConfig(api.pluginConfig);
 
     const require = createRequire(import.meta.url);
-    const pluginDir = require.resolve("./index.ts").replace(/\/index\.ts$/, "");
+    const pluginDir = require.resolve("./index.js").replace(/\/index\.js$/, "");
     const workerPath = require.resolve("./worker.py").replace(/\.py$/, ".py");
     const pythonBin = process.env.PYTHON_BIN || PYTHON_BIN;
 
