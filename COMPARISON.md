@@ -24,8 +24,8 @@ MLP 最大最重，mempalace 次之，memory-recall 是最小原型。
 
 | | MLP | MemPalace | memory-recall |
 |--|-----|-----------|---------------|
-| **向量存储** | LanceDB (ANN+FTS) | ChromaDB (hnsw) | Qdrant (hnsw) |
-| **全文索引** | LanceDB FTS | ChromaDB | rank-bm25 + jieba |
+| **向量存储** | LanceDB (ANN+FTS) | ChromaDB (hnsw) | LanceDB (ANN+FTS) |
+| **全文索引** | LanceDB FTS | ChromaDB | LanceDB FTS + jieba |
 | **图谱存储** | 无 | SQLite KG + JSON tunnels | NetworkX → JSON |
 | **元数据** | scope / category / importance | wing/room/hall / KG triples | agent_id / 6w / category |
 | **后端可替换** | 否 | 是（BaseBackend 接口） | 否 |

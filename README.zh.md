@@ -17,11 +17,11 @@
 ```
 OpenClaw Gateway (TS plugin)
     └── memory-recall (index.ts)
-            ├── 12 tools: recall/search/list/browse/stats/update/extract/reset + store/forget/get
+            ├── 14 tools: mr_memory_recall/mr_memory_store/memory_forget/mr_memory_get + memory_browse/list/search/extract/update/reset/stats/compactor + worker_status/restart
             ├── 5 hooks: message_received / agent_end / before_prompt_build / session_end / gateway_stop
             ├── registerService: decay timer (gateway托管，每24h)
-            └── Two transport modes:
-                ├── stdin (default):  TS plugin → worker.py subprocess (stdio JSON-RPC)
+            └── Per-session workers: 每个session独立Worker进程
+                ├── stdio (默认):  TS plugin → worker.py subprocess (stdio JSON-RPC)
                 └── http (pool):      TS plugin → pool_router.py (HTTP, port 18799) → worker.py subprocess per session
 
                               Python Worker (LanceDB + NetworkX)
@@ -153,18 +153,19 @@ Session ID 通过 `_session_id` 参数路由，实现多会话并发。
 
 | 工具 | 说明 |
 |------|------|
-| `memory_recall` | L1/L2/L3 混合检索，参数: query, max_results, min_score |
-| `memory_store` | 存储记忆，自动 LLM 提取 6w + category + confidence + temporal_type |
+| `mr_memory_recall` | L1/L2/L3 混合检索，参数: query, max_results, min_score |
+| `mr_memory_store` | 存储记忆，自动 LLM 提取 6w + category + confidence + temporal_type |
 | `memory_forget` | 按 ID 删除记忆（core 记忆除外） |
-| `memory_get` | 按 ID 获取单条记忆详情 |
+| `mr_memory_get` | 按 ID 获取单条记忆详情 |
 | `memory_browse` | 按会话/时间范围浏览记忆，支持汇总模式 |
 | `memory_list` | 分页列出记忆，支持分类/会话过滤 |
-| `memory_search` | BM25/jieba 快速关键词搜索 |
+| `mr_memory_search` | BM25/jieba 快速关键词搜索 |
 | `memory_extract` | 对任意文本运行 LLM 结构化提取 |
 | `memory_update` | 更新记忆内容或 metadata |
 | `memory_reset` | 清空指定 agent 的所有记忆（危险操作） |
 | `memory_stats` | 获取记忆统计：数量、分类、层级、时间类型分布 |
-| `memory_compact` | 手动触发聚类压缩（decay 自动触发） |
+| `memory_worker_status` | 显示所有活跃的 session worker 及其健康状态 |
+| `memory_worker_restart` | 手动重启指定 session 的 worker 进程 |
 
 ## Schema v0.5（21 字段）
 

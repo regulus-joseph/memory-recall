@@ -6,17 +6,19 @@
   "kind": "sensorium",
   "contracts": {
     "tools": [
-      "memory_recall",
-      "memory_store",
+      "mr_memory_recall",
+      "mr_memory_store",
       "memory_forget",
-      "memory_get",
+      "mr_memory_get",
       "memory_browse",
       "memory_list",
-      "memory_search",
+      "mr_memory_search",
       "memory_extract",
       "memory_reset",
       "memory_stats",
-      "memory_update"
+      "memory_update",
+      "memory_worker_status",
+      "memory_worker_restart"
     ]
   },
   "configSchema": {

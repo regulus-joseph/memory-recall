@@ -21,11 +21,11 @@ memory-recall is a memory plugin that automatically stores conversation content 
 ```
 OpenClaw Gateway (TS plugin)
     └── memory-recall (index.ts)
-            ├── 12 tools: recall/search/list/browse/stats/update/extract/reset + store/forget/get
+            ├── 14 tools: mr_memory_recall/mr_memory_store/memory_forget/mr_memory_get + memory_browse/list/search/extract/update/reset/stats/compactor + worker_status/restart
             ├── 5 hooks: message_received / agent_end / before_prompt_build / session_end / gateway_stop
             ├── registerService: decay timer (gateway-managed, every 24h)
-            └── Two transport modes:
-                ├── stdin (default):  TS plugin → worker.py subprocess (stdio JSON-RPC)
+            └── Per-session workers: each session gets a dedicated Worker process
+                ├── stdio (default):  TS plugin → worker.py subprocess (stdio JSON-RPC)
                 └── http (pool):      TS plugin → pool_router.py (HTTP, port 18799) → worker.py subprocess per session
 
                               Python Worker (LanceDB + NetworkX)
@@ -191,18 +191,19 @@ If policy-layer is blocking prompt injection, set:
 
 | Tool | Description |
 |------|-------------|
-| `memory_recall` | L1/L2/L3 hybrid retrieval (query, max_results, min_score) |
-| `memory_store` | Store memory with auto LLM extraction (6w + category + confidence + temporal_type) |
+| `mr_memory_recall` | L1/L2/L3 hybrid retrieval (query, max_results, min_score) |
+| `mr_memory_store` | Store memory with auto LLM extraction (6w + category + confidence + temporal_type) |
 | `memory_forget` | Delete memory by ID (except core memories, importance ≥ 0.7) |
-| `memory_get` | Get single memory details by ID |
+| `mr_memory_get` | Get single memory details by ID |
 | `memory_browse` | Browse memories by conversation/time range, supports summary mode |
 | `memory_list` | Paginated list with category/conversation filter |
-| `memory_search` | Fast BM25/jieba keyword search |
+| `mr_memory_search` | Fast BM25/jieba keyword search |
 | `memory_extract` | Run LLM structured extraction on any text |
 | `memory_update` | Update memory content or metadata |
 | `memory_reset` | Clear all memories for an agent (requires `force:true`) |
 | `memory_stats` | Get memory statistics: count, categories, tiers, temporal types |
-| `memory_compact` | Manually trigger clustering compaction |
+| `memory_worker_status` | Show all active session workers and their health status |
+| `memory_worker_restart` | Kill and restart the worker for a specific session |
 
 ---
 

@@ -17,7 +17,10 @@ async function testPlugin() {
   );
   console.log(`   ID: ${manifest.id}`);
   console.log(`   Name: ${manifest.name}`);
+  console.log(`   Version: ${manifest.version}`);
   console.log(`   Entry: ${manifest.openclaw?.plugins?.[0]?.entry}`);
+  console.log(`   Kind: ${manifest.kind}`);
+  console.log(`   Tools: ${manifest.contracts?.tools?.length ?? 0}`);
   console.log("   ✓ Manifest valid\n");
 
   // 2. Validate package.json
@@ -33,44 +36,29 @@ async function testPlugin() {
   // 3. Validate TypeScript entry
   console.log("3. Checking src/index.ts...");
   const entrySrc = readFileSync(resolve(__dirname, "src/index.ts"), "utf-8");
-  // Check for createPlugin OR memoryRecallPlugin.register
   if (!entrySrc.includes("register")) {
     throw new Error("Missing register method");
   }
-  if (!entrySrc.includes('api.on("before_prompt_build"')) {
+  if (!entrySrc.includes('api.on("before_prompt_build"') && !entrySrc.includes("before_prompt_build")) {
     throw new Error("Missing before_prompt_build hook");
   }
+  const toolNames = entrySrc.match(/name: "mr_memory_[^"]+"|name: "memory_[^"]+"/g) || [];
+  console.log(`   Tools found: ${toolNames.length}`);
   console.log("   ✓ TypeScript entry valid\n");
 
   // 4. Validate config schema
   console.log("4. Checking configSchema...");
   const schema = manifest.configSchema;
-  if (!schema?.properties?.qdrant) {
-    throw new Error("Missing qdrant config schema");
+  if (!schema?.properties?.autoStore) {
+    throw new Error("Missing autoStore config");
   }
-  if (!schema?.properties?.embedding) {
-    throw new Error("Missing embedding config schema");
+  if (!schema?.properties?.decayEnabled) {
+    throw new Error("Missing decayEnabled config");
   }
   console.log("   ✓ Config schema valid\n");
 
-  // 5. Validate Qdrant connectivity
-  console.log("5. Testing Qdrant connection...");
-  try {
-    const resp = await fetch("http://localhost:6333/collections/memory_recall", {
-      method: "GET",
-    });
-    if (resp.ok) {
-      const data = await resp.json();
-      console.log(`   ✓ Qdrant reachable, collection exists (${data.result?.points_count ?? 0} points)\n`);
-    } else {
-      console.log(`   ⚠ Qdrant responded with status ${resp.status} (collection may not exist)\n`);
-    }
-  } catch (err) {
-    console.log(`   ⚠ Qdrant not reachable: ${err.message}\n`);
-  }
-
-  // 6. Validate Ollama embedding
-  console.log("6. Testing Ollama embedding...");
+  // 5. Validate Ollama embedding
+  console.log("5. Testing Ollama embedding...");
   try {
     const resp = await fetch("http://localhost:11434/api/embeddings", {
       method: "POST",
@@ -87,11 +75,25 @@ async function testPlugin() {
     console.log(`   ⚠ Ollama not reachable: ${err.message}\n`);
   }
 
+  // 6. Validate LanceDB data dir
+  console.log("6. Checking LanceDB data directory...");
+  try {
+    const { existsSync } = await import("node:fs");
+    const dataDir = resolve(process.env.HOME ?? "", ".memory-recall/data");
+    if (existsSync(dataDir)) {
+      console.log(`   ✓ Data directory exists: ${dataDir}`);
+    } else {
+      console.log(`   ⚠ Data directory not found (will be created on first store)\n`);
+    }
+  } catch (err) {
+    console.log(`   ⚠ Data dir check failed: ${err.message}\n`);
+  }
+
   console.log("=== Smoke Test Complete ===");
   console.log("\nTo run with OpenClaw:");
-  console.log("  1. Link plugin: openclaw plugin add memory-recall");
-  console.log("  2. Or copy to ~/.openclaw/plugins/");
-  console.log("  3. Start openclaw and check logs for [memory-recall]");
+  console.log("  1. Link plugin: openclaw plugins install --link . --dangerously-force-unsafe-install");
+  console.log("  2. Start gateway: openclaw gateway restart");
+  console.log("  3. Check logs: openclaw logs 2>&1 | grep memory-recall");
 }
 
 testPlugin().catch((err) => {

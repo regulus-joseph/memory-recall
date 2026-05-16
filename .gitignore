@@ -19,6 +19,7 @@ build/
 graphify-out/cache/
 .graphify_ast.json
 .graphify_detect.json
+*.html
 
 # Graph outputs (generated, large)
 graph.html
