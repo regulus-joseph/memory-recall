@@ -2,43 +2,39 @@
 
 > 适用环境：Win11 + WSL2 (Ubuntu)
 > 目标用户：个人开发者
-> 当前版本：v0.5.0 (LanceDB + worker 架构 + HTTP pool 模式)
+> 当前版本：v0.7.0 (纯 TypeScript MemoryStore, 无 Python worker)
 
 ---
 
 ## 环境要求
 
 - **WSL2** + Ubuntu（systemd 已启用）
-- **Python 3.12**
+- **Node.js** (openclaw gateway)
 - **Ollama**（WSL2 内运行）
   - `bge-m3`（embedding）
   - `qwen2.5:7b`（LLM extraction）
-- **Node.js**（openclaw gateway）
 
-**无外部依赖**：Qdrant 已移除，所有数据存在本地 LanceDB 文件。
+**无外部依赖**：无 Python worker、无 Qdrant、无 LanceDB server，数据存在本地 LanceDB 文件。
 
 ---
 
 ## 依赖安装
 
-### 1. Ollama 模型
+### 1. Build tools（nodejieba 编译需要）
+
+```bash
+# Ubuntu/WSL2
+apt install build-essential python3
+
+# macOS
+xcode-select --install
+```
+
+### 2. Ollama 模型
 
 ```bash
 ollama pull bge-m3
 ollama pull qwen2.5:7b
-```
-
-### 2. Python venv
-
-```bash
-# 如果已有 ~/.memory-recall-venv，跳过此步
-python3.12 -m venv ~/.memory-recall-venv
-~/.memory-recall-venv/bin/pip install lancedb jieba networkx
-```
-
-验证：
-```bash
-~/.memory-recall-venv/bin/python -c "import lancedb, jieba, networkx; print('all ok')"
 ```
 
 ---
@@ -47,26 +43,11 @@ python3.12 -m venv ~/.memory-recall-venv
 
 ```bash
 cd ~/projects/memory-recall
+npm install
 openclaw plugins install --link . --dangerously-force-unsafe-install
 ```
 
-### 传输模式选择
-
-**stdio 模式（默认）**：单 Gateway 进程内通过 subprocess 通信
-```bash
-# 默认即为 stdio 模式
-openclaw gateway restart
-```
-
-**HTTP pool 模式**：支持多会话并发，需要先启动 pool_router.py
-```bash
-# 终端1: 启动 pool router
-cd ~/projects/memory-recall
-~/.memory-recall-venv/bin/python pool_router.py &
-
-# 终端2: 启动 gateway（启用 pool 模式）
-USE_HTTP_POOL=1 openclaw gateway restart
-```
+> 注意：`--dangerously-force-unsafe-install` 仍需要，因为使用了 child_process.spawn。但已无 Python worker 依赖。
 
 ---
 
@@ -175,12 +156,12 @@ print(f'Nodes: {g.number_of_nodes()}, Edges: {g.number_of_edges()}')
 # 1. 查看详细日志
 openclaw logs 2>&1 | grep memory-recall | tail -20
 
-# 2. 手动运行 worker 看报错
+# 2. 检查 npm 依赖
 cd ~/projects/memory-recall
-~/.memory-recall-venv/bin/python src/worker.py
+npm install
 
-# 3. 检查 Python 依赖
-~/.memory-recall-venv/bin/python -c "import lancedb, jieba, networkx; print('deps ok')"
+# 3. 检查 nodejieba 编译
+node -e "require('nodejieba')" 2>&1
 ```
 
 ### 向量检索返回空

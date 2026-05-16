@@ -1,16 +1,16 @@
 # Memory Recall Plugin
 
-> L1/L2/L3 cascade memory recall for OpenClaw: per-agent LanceDB (vector + FTS) + NetworkX graph expansion. Async LLM extraction, Weibull decay, progressive compaction.
+> L1/L2/L3 cascade memory recall for OpenClaw: per-agent LanceDB (vector + scalar) + graphology graph expansion. Async LLM extraction, Weibull decay, progressive compaction. Pure TypeScript — no Python worker.
 
 ## Version
 
-**v0.5.0** · OpenClaw 2026.5.x compatible
+**v0.7.0** · OpenClaw 2026.5.x compatible
 
 ---
 
 ## Overview
 
-memory-recall is a memory plugin that automatically stores conversation content and recalls relevant memories at the start of each agent turn. It uses a cascade retrieval architecture (L1 vector → L2 FTS → L3 graph expansion) and manages memory lifecycle with Weibull decay and progressive compaction.
+memory-recall is a memory plugin that automatically stores conversation content and recalls relevant memories at the start of each agent turn. It uses a cascade retrieval architecture (L1 vector → L2 BM25 → L3 graph expansion) and manages memory lifecycle with Weibull decay and progressive compaction.
 
 **Key differentiator from memory-core**: memory-recall focuses on *recall* (retrieving past memories for current context), while memory-core focuses on *storage* (managing the memory database). Both can coexist; memory-recall is marked as `kind: "utility"` to avoid slot conflicts.
 
@@ -20,34 +20,34 @@ memory-recall is a memory plugin that automatically stores conversation content 
 
 ```
 OpenClaw Gateway (TS plugin)
-    └── memory-recall (index.ts)
-            ├── 14 tools: mr_memory_recall/mr_memory_store/memory_forget/mr_memory_get + memory_browse/list/search/extract/update/reset/stats/compactor + worker_status/restart
+    └── memory-recall (index.ts / dist/index.js)
+            ├── 14 tools: mr_memory_recall/mr_memory_store/memory_forget/mr_memory_get + memory_browse/list/search/extract/update/reset/stats + worker_status/restart
             ├── 5 hooks: message_received / agent_end / before_prompt_build / session_end / gateway_stop
             ├── registerService: decay timer (gateway-managed, every 24h)
-            └── Per-session workers: each session gets a dedicated Worker process
-                ├── stdio (default):  TS plugin → worker.py subprocess (stdio JSON-RPC)
-                └── http (pool):      TS plugin → pool_router.py (HTTP, port 18799) → worker.py subprocess per session
-
-                              Python Worker (LanceDB + NetworkX)
-                              ├── L1: LanceDB vector search (per-agent)
-                              ├── L2: LanceDB FTS (jieba tokenize, per-agent)
-                              ├── L3: NetworkX graph expansion (per-agent)
-                              ├── LLM extraction: 6w + category + confidence + temporal_type (async)
-                              ├── Decay: Weibull composite score (recency/frequency/intrinsic)
-                              ├── Compactor: cosine similarity clustering (merge → max importance)
-                              ├── Tier protection: core memories (importance ≥ 0.7) immune
-                              └── LanceDB data: ~/.memory-recall/data/{agent_id}/memories.lance
+            └── MemoryStore (pure TypeScript, per-session)
+                ├── L1: LanceDB vector search (per-agent, 1024-dim bge-m3)
+                ├── L2: BM25 rerank + nodejieba Chinese tokenization
+                ├── L3: graphology graph expansion (per-agent)
+                ├── LLM extraction: direct Ollama API (qwen2.5:7b)
+                ├── Decay: Weibull composite score (recency/frequency/intrinsic)
+                ├── Compactor: cosine similarity clustering
+                ├── Tier protection: core memories (importance ≥ 0.7) immune
+                └── LanceDB data: ~/.memory-recall/data/{scope}/memories.lance
+                    graphology data: ~/.memory-recall/data/{scope}/graph.json
 ```
 
 ---
 
 ## Prerequisites
 
-### 1. Python venv
+### 1. Build tools (for nodejieba)
 
 ```bash
-python3.12 -m venv ~/.memory-recall-venv
-~/.memory-recall-venv/bin/pip install lancedb jieba networkx httpx
+# Ubuntu/WSL2
+apt install build-essential python3
+
+# macOS
+xcode-select --install
 ```
 
 ### 2. Ollama models
@@ -65,8 +65,11 @@ ollama pull qwen2.5:7b       # for LLM extraction (6w + category + confidence)
 
 ```bash
 cd ~/projects/memory-recall
+npm install
 openclaw plugins install --link . --dangerously-force-unsafe-install
 ```
+
+Note: `--dangerously-force-unsafe-install` is still required because the plugin uses `child_process.spawn`. However, the Python worker is no longer needed — only the npm dependencies (nodejieba requires native compilation).
 
 ### 2. Configure openclaw.json
 

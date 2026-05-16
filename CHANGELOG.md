@@ -2,6 +2,28 @@
 
 All notable changes to memory-recall are documented here.
 
+## v0.7.0 (2026-05-17)
+
+### Breaking Change: Pure TypeScript (No Python Worker)
+- **Removed**: Python worker, `pool_router.py`, `worker.py`, all `src/core/*.py`, `src/utils/*.py`
+- **New**: `MemoryStore` class — pure TypeScript implementation using:
+  - `@lancedb/lancedb` for vector + scalar storage (per-agent LanceDB)
+  - `graphology` for L3 graph expansion (replaces NetworkX)
+  - `nodejieba` for Chinese word segmentation
+  - `bm25` package for L2 BM25 scoring
+  - Direct `fetch` to Ollama API for embedding + LLM extraction
+- **Installation**: now requires `npm install` (nodejieba needs build tools: `apt install build-essential python3`)
+- **No more** `~/.memory-recall-venv` Python venv
+- **No more** `USE_HTTP_POOL` env var (single-process per-session stores)
+- LanceDB FTS replaced by BM25 + WHERE clause LIKE queries
+
+### Architecture
+- `sessionWorkers` Map stores `MemoryStore` instances per session
+- `getSessionWorker(sessionKey)` returns or creates a `MemoryStore`
+- All 16 worker methods now in `MemoryStore` class
+
+---
+
 ## v0.6.0 (2026-05-16)
 
 ### Architecture

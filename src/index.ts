@@ -16,6 +16,13 @@ import { spawn } from "node:child_process";
 import { createRequire } from "node:module";
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
 import { Type } from "@sinclair/typebox";
+import type { Connection, Table } from "@lancedb/lancedb";
+import Graph from "graphology";
+import nodejieba from "nodejieba";
+import BM25 from "bm25";
+import { homedir } from "node:os";
+import { existsSync, mkdirSync, readFileSync, writeFileSync, unlinkSync } from "node:fs";
+import { join } from "node:path";
 
 interface MemoryRecallConfig {
   autoStore?: boolean;
@@ -50,167 +57,276 @@ interface SessionBufferEntry {
 const sessionBuffers = new Map<string, SessionBufferEntry[]>();
 
 // Per-session worker map
-const sessionWorkers = new Map<string, SessionWorker>();
+const sessionWorkers = new Map<string, MemoryStore>();
 
-const PYTHON_BIN = process.env.PYTHON_BIN || "/home/marlon-wei/.memory-recall-venv/bin/python";
+// ─── Memory Schema ─────────────────────────────────────────────────────────────
 
-// ─── Session Worker (per-session subprocess) ───────────────────────────────────
+interface MemoryRecord {
+  id: string;
+  text: string;
+  tokens: string;
+  vector: Float32Array;
+  category: string;
+  scope: string;
+  conversation_id: string;
+  importance: number;
+  timestamp: number;
+  stored_at: string;
+  metadata_json: string;
+  who: string;
+  what: string;
+  when: string;
+  where: string;
+  why: string;
+  how: string;
+  summary: string;
+  confidence: number;
+  temporal_type: string;
+  access_count: number;
+  last_accessed_at: number;
+  compaction_rounds: number;
+  last_compacted_at: number;
+  original_source_count: number;
+}
 
-class SessionWorker {
-  private proc: ReturnType<typeof spawn>;
-  private pending: Map<number, { resolve: (v: unknown) => void; reject: (e: Error) => void }> = new Map();
-  private nextId = 1;
-  private ready = false;
-  private dead = false;
-  private readyPromise: Promise<void>;
-  private stderr = "";
-  private pythonBin: string;
-  private workerPath: string;
-  private cwd: string;
-  private sessionKey: string;
+// ─── Memory Store (pure TypeScript) ────────────────────────────────────────────
 
-  constructor(pythonBin: string, workerPath: string, cwd: string, sessionKey: string) {
-    this.pythonBin = pythonBin;
-    this.workerPath = workerPath;
-    this.cwd = cwd;
-    this.sessionKey = sessionKey;
-    this.proc = spawn(pythonBin, [workerPath], {
-      stdio: ["pipe", "pipe", "pipe"],
-      env: { ...process.env, PYTHONUNBUFFERED: "1" },
-      cwd,
-    });
-    this._setupProcessHandlers();
-    this.readyPromise = new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
-        reject(new Error(`worker init timeout, stderr: ${this.stderr.slice(0, 200)}`));
-      }, 10000);
-      this.proc.on("error", (e) => {
-        clearTimeout(timer);
-        reject(e);
-      });
-      this.onceReady = () => {
-        clearTimeout(timer);
-        this.ready = true;
-        this.dead = false;
-        resolve();
-      };
-    });
-    this.initPromise = this.readyPromise;
-    this._ping().catch(() => {});
+const EMBEDDING_URL = process.env.EMBEDDING_URL || "http://localhost:11434/api/embeddings";
+const EMBEDDING_MODEL = process.env.EMBEDDING_MODEL || "bge-m3";
+const OLLAMA_URL = process.env.OLLAMA_URL || "http://localhost:11434";
+const LLM_MODEL = process.env.LLM_MODEL || "qwen2.5:7b";
+const DATA_DIR = process.env.DATA_DIR || join(homedir(), ".memory-recall", "data");
+const EMBEDDING_DIM = 1024;
+
+function getDataDir(scope: string): string {
+  const dir = join(DATA_DIR, scope);
+  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+  return dir;
+}
+
+function getGraphPath(scope: string): string {
+  return join(getDataDir(scope), "graph.json");
+}
+
+function getLanceDBPath(scope: string): string {
+  return join(getDataDir(scope), "lancedb");
+}
+
+function uuid(): string {
+  return Date.now().toString(36) + Math.random().toString(36).slice(2, 10);
+}
+
+function tokenize(text: string): string[] {
+  const chinese = /[\u4e00-\u9fff]/.test(text);
+  if (chinese) {
+    return nodejieba.cut(text, true).filter(t => t.length > 1);
   }
+  return text.split(/\s+/).filter(t => t.length > 1);
+}
 
-  private onceReady: () => void = () => {};
+async function getEmbedding(text: string): Promise<Float32Array> {
+  const resp = await fetch(EMBEDDING_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ model: EMBEDDING_MODEL, prompt: text }),
+    signal: AbortSignal.timeout(30000),
+  });
+  if (!resp.ok) throw new Error(`embedding failed: ${resp.status}`);
+  const data = await resp.json() as { embedding?: number[] };
+  const embedding = data.embedding;
+  if (!embedding || !Array.isArray(embedding)) throw new Error("no embedding in response");
+  return new Float32Array(embedding);
+}
+
+interface ExtractedFields {
+  category: string;
+  importance: number;
+  confidence: number;
+  temporal_type: string;
+  who: string;
+  what: string;
+  when: string;
+  where: string;
+  why: string;
+  how: string;
+  summary: string;
+}
+
+async function extractFields(content: string): Promise<ExtractedFields> {
+  const prompt = `You are a memory extraction system. Analyze the following text and extract structured memory fields. Return ONLY a valid JSON object with these exact fields (no markdown, no explanation):
+
+{
+  "category": "event|fact|preference|conversation|task|other",
+  "importance": 0.0-1.0 (float),
+  "confidence": 0.0-1.0 (float),
+  "temporal_type": "dynamic|static|recurring|ephemeral",
+  "who": "who is involved (empty string if none)",
+  "what": "what happened (empty string if none)",
+  "when": "when did it happen (empty string if none)",
+  "where": "where did it happen (empty string if none)",
+  "why": "why did it happen (empty string if none)",
+  "how": "how did it happen (empty string if none)",
+  "summary": "2-3 sentence summary of the memory"
+}
+
+Text to analyze:
+${content.slice(0, 2000)}
+
+Respond with ONLY the JSON object.`;
+
+  const resp = await fetch(`${OLLAMA_URL}/api/generate`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ model: LLM_MODEL, prompt, stream: false }),
+    signal: AbortSignal.timeout(60000),
+  });
+  if (!resp.ok) throw new Error(`extract failed: ${resp.status}`);
+  const data = await resp.json() as { response?: string };
+  const text = data.response || "{}";
+  const jsonMatch = text.match(/\{[\s\S]*\}/);
+  if (!jsonMatch) throw new Error("no JSON in extract response");
+  try {
+    return JSON.parse(jsonMatch[0]) as ExtractedFields;
+  } catch {
+    return {
+      category: "other", importance: 0.5, confidence: 0.5,
+      temporal_type: "dynamic", who: "", what: "", when: "",
+      where: "", why: "", how: "", summary: content.slice(0, 200),
+    };
+  }
+}
+
+function cosineSimilarity(a: Float32Array, b: Float32Array): number {
+  let dot = 0, na = 0, nb = 0;
+  for (let i = 0; i < a.length; i++) {
+    dot += a[i] * b[i];
+    na += a[i] * a[i];
+    nb += b[i] * b[i];
+  }
+  return dot / (Math.sqrt(na) * Math.sqrt(nb) + 1e-10);
+}
+
+function weibullScore(
+  storedAt: string,
+  importance: number,
+  accessCount: number,
+  temporalType: string,
+  maxAccessCount: number
+): number {
+  const now = Date.now();
+  const stored = new Date(storedAt).getTime();
+  const ageMs = now - stored;
+  const halfLifeMap: Record<string, number> = {
+    dynamic: 7 * 24 * 3600 * 1000 / 3,
+    static: 365 * 24 * 3600 * 1000,
+    recurring: 30 * 24 * 3600 * 1000,
+    ephemeral: 1 * 24 * 3600 * 1000,
+  };
+  const halfLife = halfLifeMap[temporalType] || 30 * 24 * 3600 * 1000;
+  const recencyScore = Math.exp(-ageMs / halfLife);
+  const frequencyScore = maxAccessCount > 0 ? accessCount / maxAccessCount : 0;
+  const intrinsicScore = importance;
+  return Math.max(0.1, 0.4 * recencyScore + 0.3 * frequencyScore + 0.3 * intrinsicScore);
+}
+
+function scoreBM25(query: string, documents: string[]): number[] {
+  const tokenized = documents.map(d => tokenize(d));
+  const queryTokens = tokenize(query);
+  const bm25 = new BM25(tokenized);
+  return bm25.search(queryTokens);
+}
+
+// ─── Memory Store ──────────────────────────────────────────────────────────────
+
+class MemoryStore {
+  private db: Connection | null = null;
+  private table: Table | null = null;
+  private graph: Graph | null = null;
+  private scope: string;
+  private vectorIndex: Map<string, Float32Array> = new Map();
+  private initialized = false;
   private initPromise: Promise<void>;
 
-  private _ping(): Promise<void> {
-    return new Promise((resolve) => {
-      const id = this.nextId++;
-      this.pending.set(id, {
-        resolve: (v: unknown) => resolve(),
-        reject: () => resolve(),
+  constructor(scope: string) {
+    this.scope = scope || "default";
+    this.initPromise = this._init();
+  }
+
+  private async _init(): Promise<void> {
+    try {
+      const { connect } = await import("@lancedb/lancedb");
+      const dbPath = getLanceDBPath(this.scope);
+      this.db = await connect(dbPath);
+
+      const schema: Array<{ name: string; type: unknown }> = [
+        { name: "vector", type: new Float32Array(0).constructor },
+        { name: "text", type: String },
+        { name: "tokens", type: String },
+        { name: "category", type: String },
+        { name: "scope", type: String },
+        { name: "conversation_id", type: String },
+        { name: "importance", type: Number },
+        { name: "timestamp", type: Number },
+        { name: "stored_at", type: String },
+        { name: "metadata_json", type: String },
+        { name: "who", type: String },
+        { name: "what", type: String },
+        { name: "when", type: String },
+        { name: "where", type: String },
+        { name: "why", type: String },
+        { name: "how", type: String },
+        { name: "summary", type: String },
+        { name: "confidence", type: Number },
+        { name: "temporal_type", type: String },
+        { name: "access_count", type: Number },
+        { name: "last_accessed_at", type: Number },
+        { name: "compaction_rounds", type: Number },
+        { name: "last_compacted_at", type: Number },
+        { name: "original_source_count", type: Number },
+      ];
+
+      this.table = await this.db.createTable("memories", schema as unknown as Record<string, unknown>[]).catch(async () => {
+        return await this.db!.openTable("memories");
       });
-      const req = JSON.stringify({ jsonrpc: "2.0", id, method: "ping", params: {} }) + "\n";
-      this.proc.stdin?.write(req);
-      setTimeout(() => {
-        this.pending.delete(id);
-        resolve();
-      }, 5000);
-    });
-  }
 
-  private _setupProcessHandlers() {
-    this.proc.stderr?.on("data", (d: Buffer) => {
-      this.stderr += d.toString();
-    });
-
-    this.proc.stdin?.on("error", (err: NodeJS.ErrnoException) => {
-      if (err.code === "EPIPE" || err.code === "ECONNRESET") {
-        console.warn(`[memory-recall] worker ${this.sessionKey} stdin EPIPE, will restart`);
-        this.ready = false;
-        this.dead = true;
+      this.graph = new Graph();
+      const graphPath = getGraphPath(this.scope);
+      if (existsSync(graphPath)) {
+        try {
+          const data = JSON.parse(readFileSync(graphPath, "utf-8"));
+          this.graph = Graph.from(data);
+        } catch {}
       }
-    });
 
-    this.proc.stdout?.on("data", (d: Buffer) => {
-      this.handleLine(d.toString());
-    });
-  }
-
-  private async _restart(): Promise<void> {
-    if (!this.dead) return;
-    this.proc.kill();
-    this.pending.clear();
-    this.stderr = "";
-    this.nextId = 1;
-    this.ready = false;
-    this.proc = spawn(this.pythonBin, [this.workerPath], {
-      stdio: ["pipe", "pipe", "pipe"],
-      env: { ...process.env, PYTHONUNBUFFERED: "1" },
-      cwd: this.cwd,
-    });
-    this._setupProcessHandlers();
-    this.readyPromise = new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
-        reject(new Error(`worker restart timeout, stderr: ${this.stderr.slice(0, 200)}`));
-      }, 10000);
-      this.proc.on("error", (e) => {
-        clearTimeout(timer);
-        reject(e);
-      });
-      this.onceReady = () => {
-        clearTimeout(timer);
-        this.ready = true;
-        this.dead = false;
-        resolve();
-      };
-    });
-    this.initPromise = this.readyPromise;
-    this._ping().catch(() => {});
-  }
-
-  private handleLine(data: string) {
-    const lines = data.split("\n");
-    for (const line of lines) {
-      if (!line.trim()) continue;
-      try {
-        const msg = JSON.parse(line) as Record<string, unknown>;
-        if (!this.ready && msg.id !== undefined && "result" in msg) {
-          this.onceReady();
-        }
-        if (msg.id !== undefined && this.pending.has(msg.id as number)) {
-          const cb = this.pending.get(msg.id as number)!;
-          this.pending.delete(msg.id as number);
-          if (msg.error) {
-            cb.reject(new Error((msg.error as { message?: string }).message || JSON.stringify(msg.error)));
-          } else {
-            cb.resolve(msg.result);
-          }
-        }
-      } catch {
-        // ignore non-JSON lines
-      }
+      this.initialized = true;
+    } catch (err) {
+      console.warn(`[memory-recall] init error for ${this.scope}: ${err}`);
+      throw err;
     }
   }
 
-  async call<T = unknown>(method: string, params: Record<string, unknown> = {}): Promise<T> {
-    if (this.dead) await this._restart();
+  private async _ensureInit(): Promise<void> {
+    if (this.initialized) return;
     await this.initPromise;
-    return new Promise((resolve, reject) => {
-      const id = this.nextId++;
-      this.pending.set(id, { resolve: resolve as (v: unknown) => void, reject });
-      const req = JSON.stringify({ jsonrpc: "2.0", id, method, params }) + "\n";
-      this.proc.stdin?.write(req);
-      setTimeout(() => {
-        if (this.pending.has(id)) {
-          this.pending.delete(id);
-          reject(new Error(`timeout calling ${method}`));
-        }
-      }, 30000);
-    });
+  }
+
+  private async _saveGraph(): Promise<void> {
+    if (!this.graph) return;
+    try {
+      writeFileSync(getGraphPath(this.scope), JSON.stringify(this.graph.toJSON()));
+    } catch {}
+  }
+
+  private async _buildIndex(): Promise<void> {
+    if (!this.table) return;
+    try {
+      await this.table.createIndex("tokens", "BM25");
+    } catch {}
   }
 
   async health(): Promise<{ status: string }> {
-    return this.call("health", {});
+    await this._ensureInit();
+    return { status: "ok" };
   }
 
   async store(params: {
@@ -219,7 +335,101 @@ class SessionWorker {
     conversation_id?: string;
     metadata?: Record<string, unknown>;
   }): Promise<{ memory_id: string; conversation_id: string; dedup: boolean }> {
-    return this.call("store", params);
+    await this._ensureInit();
+    const content = params.content;
+    const scope = params.agent_id || this.scope;
+    const conversation_id = params.conversation_id || uuid();
+
+    const dedup = await this._checkDedup(content, scope);
+
+    const embedding = await getEmbedding(content);
+    const tokens = tokenize(content).join(" ");
+    let extracted: ExtractedFields;
+    try {
+      extracted = await extractFields(content);
+    } catch {
+      extracted = {
+        category: "other", importance: 0.5, confidence: 0.5,
+        temporal_type: "dynamic", who: "", what: "", when: "",
+        where: "", why: "", how: "", summary: content.slice(0, 200),
+      };
+    }
+
+    const now = Date.now();
+    const memory_id = uuid();
+    const record: Record<string, unknown> = {
+      id: memory_id,
+      text: content,
+      tokens,
+      vector: embedding,
+      category: extracted.category,
+      scope,
+      conversation_id,
+      importance: extracted.importance,
+      timestamp: now,
+      stored_at: new Date(now).toISOString(),
+      metadata_json: JSON.stringify(params.metadata || {}),
+      who: extracted.who,
+      what: extracted.what,
+      when: extracted.when,
+      where: extracted.where,
+      why: extracted.why,
+      how: extracted.how,
+      summary: extracted.summary,
+      confidence: extracted.confidence,
+      temporal_type: extracted.temporal_type,
+      access_count: 0,
+      last_accessed_at: now,
+      compaction_rounds: 0,
+      last_compacted_at: 0,
+      original_source_count: 1,
+    };
+
+    await this.table!.add([record]);
+    this.vectorIndex.set(memory_id, embedding);
+
+    if (this.graph) {
+      this.graph.addNode(memory_id, { scope, category: extracted.category });
+      const existing = await this._findRelated(memory_id, embedding, 5);
+      for (const rel of existing) {
+        if (rel !== memory_id) {
+          try { this.graph!.addEdge(memory_id, rel); } catch {}
+          try { this.graph!.addEdge(rel, memory_id); } catch {}
+        }
+      }
+      await this._saveGraph();
+    }
+
+    return { memory_id, conversation_id, dedup };
+  }
+
+  private async _checkDedup(content: string, scope: string): Promise<boolean> {
+    try {
+      const results = await this.table!.search(content, "tokens").limit(5).toArray();
+      for (const r of results as Record<string, unknown>[]) {
+        const similarity = cosineSimilarity(
+          (r.vector as Float32Array) || new Float32Array(EMBEDDING_DIM),
+          await getEmbedding(content)
+        );
+        if (similarity > 0.92) return true;
+      }
+    } catch {}
+    return false;
+  }
+
+  private async _findRelated(memoryId: string, embedding: Float32Array, limit: number): Promise<string[]> {
+    if (!this.table) return [];
+    try {
+      const all = await this.table.query().limit(1000).toArray();
+      const scored = all
+        .map(r => ({ id: r.id as string, sim: cosineSimilarity(embedding, (r.vector as Float32Array) || new Float32Array(EMBEDDING_DIM)) }))
+        .filter(x => x.id !== memoryId && x.sim > 0.7)
+        .sort((a, b) => b.sim - a.sim)
+        .slice(0, limit);
+      return scored.map(s => s.id);
+    } catch {
+      return [];
+    }
   }
 
   async recall(params: {
@@ -232,15 +442,114 @@ class SessionWorker {
     count: number;
     layers: { l1: number; l2: number; l3: number };
   }> {
-    return this.call("recall", params);
+    await this._ensureInit();
+    const maxResults = params.max_results ?? 5;
+    const minScore = params.min_score ?? 0;
+    const scope = params.agent_id || this.scope;
+
+    const embedding = await getEmbedding(params.query);
+    const candidates = await this._vectorSearch(embedding, scope, maxResults * 3);
+    const l1Count = candidates.length;
+
+    const l2Results = this._bm25Rerank(params.query, candidates);
+    const l2Count = l2Results.length;
+
+    const l3Results = await this._graphExpand(l2Results);
+    const l3Count = l3Results.length;
+
+    const results = l3Results
+      .filter(r => (r.relevance_score as number) >= minScore)
+      .slice(0, maxResults);
+
+    return { results, count: results.length, layers: { l1: l1Count, l2: l2Count, l3: l3Count } };
+  }
+
+  private async _vectorSearch(embedding: Float32Array, scope: string, limit: number): Promise<Array<Record<string, unknown> & { relevance_score: number }>> {
+    if (!this.table) return [];
+    try {
+      const all = await this.table.query().limit(500).toArray();
+      const scored = all
+        .filter(r => (r.scope as string) === scope)
+        .map(r => ({
+          ...r,
+          relevance_score: cosineSimilarity(embedding, (r.vector as Float32Array) || new Float32Array(EMBEDDING_DIM)),
+        }))
+        .sort((a, b) => (b.relevance_score as number) - (a.relevance_score as number))
+        .slice(0, limit);
+      return scored;
+    } catch {
+      return [];
+    }
+  }
+
+  private _bm25Rerank(query: string, candidates: Array<Record<string, unknown> & { relevance_score: number }>): Array<Record<string, unknown> & { relevance_score: number }> {
+    if (!candidates.length) return [];
+    const texts = candidates.map(c => c.text as string);
+    const scores = scoreBM25(query, texts);
+    return candidates
+      .map((c, i) => ({ ...c, relevance_score: Math.max(c.relevance_score as number, scores[i] || 0) }))
+      .sort((a, b) => (b.relevance_score as number) - (a.relevance_score as number));
+  }
+
+  private async _graphExpand(candidates: Array<Record<string, unknown> & { relevance_score: number }>): Promise<Array<Record<string, unknown> & { relevance_score: number }>> {
+    if (!this.graph || candidates.length === 0) return candidates;
+    const expanded = new Set<string>();
+    const resultMap = new Map<string, Record<string, unknown> & { relevance_score: number }>();
+
+    for (const c of candidates) {
+      expanded.add(c.id as string);
+      resultMap.set(c.id as string, c);
+    }
+
+    for (const c of candidates) {
+      try {
+        const neighbors = this.graph.neighbors(c.id as string);
+        for (const n of neighbors) {
+          if (!expanded.has(n)) {
+            expanded.add(n);
+            const memory = await this.get({ memory_id: n, agent_id: this.scope });
+            if (memory && memory.found) {
+              resultMap.set(n, memory as Record<string, unknown> & { relevance_score: number });
+            }
+          }
+        }
+      } catch {}
+    }
+
+    return Array.from(resultMap.values());
   }
 
   async forget(params: { memory_id: string }): Promise<{ memory_id: string; deleted: boolean }> {
-    return this.call("forget", params);
+    await this._ensureInit();
+    const memory_id = params.memory_id;
+    try {
+      await this.table!.delete(`id = '${memory_id}'`);
+      this.vectorIndex.delete(memory_id);
+      if (this.graph) {
+        try { this.graph.dropNode(memory_id); } catch {}
+        await this._saveGraph();
+      }
+      return { memory_id, deleted: true };
+    } catch {
+      return { memory_id, deleted: false };
+    }
   }
 
   async get(params: { memory_id: string; agent_id?: string }): Promise<Record<string, unknown>> {
-    return this.call("get", params);
+    await this._ensureInit();
+    try {
+      const results = await this.table!.search(params.memory_id, "id").limit(1).toArray();
+      if (!results.length) return { found: false };
+      const r = results[0] as Record<string, unknown>;
+      await this.table!.update([{
+        ...r,
+        access_count: (r.access_count as number || 0) + 1,
+        last_accessed_at: Date.now(),
+      }]);
+      return { ...r, found: true };
+    } catch {
+      return { found: false };
+    }
   }
 
   async stats(params: { agent_id?: string }): Promise<{
@@ -248,7 +557,19 @@ class SessionWorker {
     bm25_doc_count: number;
     graph_node_count: number;
   }> {
-    return this.call("stats", params);
+    await this._ensureInit();
+    const scope = params.agent_id || this.scope;
+    try {
+      const all = await this.table!.query().limit(10000).toArray();
+      const filtered = all.filter(r => (r.scope as string) === scope);
+      return {
+        memory_count: filtered.length,
+        bm25_doc_count: filtered.length,
+        graph_node_count: this.graph ? this.graph.size : 0,
+      };
+    } catch {
+      return { memory_count: 0, bm25_doc_count: 0, graph_node_count: 0 };
+    }
   }
 
   async list(params: {
@@ -265,7 +586,24 @@ class SessionWorker {
     limit: number;
     agent_id: string;
   }> {
-    return this.call("list", params);
+    await this._ensureInit();
+    const scope = params.agent_id || this.scope;
+    const limit = params.limit ?? 20;
+    const offset = params.offset ?? 0;
+    try {
+      const all = await this.table!.query().limit(10000).toArray();
+      let filtered = all.filter(r => (r.scope as string) === scope);
+      if (params.category) filtered = filtered.filter(r => (r.category as string) === params.category);
+      if (params.conversation_id) filtered = filtered.filter(r => (r.conversation_id as string) === params.conversation_id);
+      const sorted = filtered.sort((a, b) => {
+        if (params.sort === "asc") return (a.timestamp as number) - (b.timestamp as number);
+        return (b.timestamp as number) - (a.timestamp as number);
+      });
+      const memories = sorted.slice(offset, offset + limit);
+      return { memories, count: filtered.length, offset, limit, agent_id: scope };
+    } catch {
+      return { memories: [], count: 0, offset, limit, agent_id: scope };
+    }
   }
 
   async search(params: {
@@ -277,7 +615,23 @@ class SessionWorker {
     results: Array<Record<string, unknown>>;
     count: number;
   }> {
-    return this.call("search", params);
+    await this._ensureInit();
+    const scope = params.agent_id || this.scope;
+    const limit = params.limit ?? 20;
+    try {
+      const all = await this.table!.query().limit(10000).toArray();
+      const filtered = all.filter(r => (r.scope as string) === scope);
+      const texts = filtered.map(r => r.text as string);
+      const scores = scoreBM25(params.query, texts);
+      const results = filtered
+        .map((r, i) => ({ ...r, score: scores[i] || 0 }))
+        .filter(r => r.score > 0)
+        .sort((a, b) => (b.score as number) - (a.score as number))
+        .slice(params.offset ?? 0, limit);
+      return { results, count: results.length };
+    } catch {
+      return { results: [], count: 0 };
+    }
   }
 
   async extract(params: { content: string }): Promise<{
@@ -293,7 +647,8 @@ class SessionWorker {
     how: string;
     summary: string;
   }> {
-    return this.call("extract", params);
+    await this._ensureInit();
+    return extractFields(params.content);
   }
 
   async reset(params: { agent_id?: string; force?: boolean }): Promise<{
@@ -302,23 +657,163 @@ class SessionWorker {
     agent_id?: string;
     error?: string;
   }> {
-    return this.call("reset", params);
+    await this._ensureInit();
+    if (!params.force) return { reset: false, error: "need force:true", agent_id: params.agent_id };
+    const scope = params.agent_id || this.scope;
+    try {
+      const all = await this.table!.query().limit(10000).toArray();
+      const filtered = all.filter(r => (r.scope as string) === scope);
+      const count = filtered.length;
+      await this.table!.delete(`scope = '${scope}'`);
+      this.vectorIndex.clear();
+      if (this.graph) {
+        const nodesToDrop: string[] = [];
+        this.graph.forEachNode((node, attrs) => {
+          if (attrs.scope === scope) nodesToDrop.push(node);
+        });
+        for (const n of nodesToDrop) {
+          try { this.graph!.dropNode(n); } catch {}
+        }
+        await this._saveGraph();
+      }
+      return { reset: true, deleted: count, agent_id: scope };
+    } catch (err) {
+      return { reset: false, error: String(err), agent_id: scope };
+    }
   }
 
-  async compact(params: { dry_run?: boolean; limit?: number; scopes?: string[] }): Promise<{
+  async compact(params: {
+    dry_run?: boolean;
+    limit?: number;
+    scopes?: string[];
+  }): Promise<{
     clusters_found: number;
     memories_deleted: number;
     memories_created: number;
     dry_run: boolean;
   }> {
-    return this.call("compact", params);
+    await this._ensureInit();
+    const dryRun = params.dry_run ?? false;
+    const maxRounds = params.limit ?? 4;
+    const scopes = params.scopes || [this.scope];
+    let clustersFound = 0, deletedCount = 0, createdCount = 0;
+
+    for (const scope of scopes) {
+      let round = 0;
+      let changed = true;
+      while (changed && round < maxRounds) {
+        changed = false;
+        round++;
+        const all = await this.table!.query().limit(5000).toArray();
+        const filtered = all.filter(r => (r.scope as string) === scope);
+        const toDelete: string[] = [];
+        const toCreate: Array<Record<string, unknown>> = [];
+
+        for (let i = 0; i < filtered.length; i++) {
+          const a = filtered[i];
+          const va = (a.vector as Float32Array) || new Float32Array(EMBEDDING_DIM);
+          for (let j = i + 1; j < filtered.length; j++) {
+            const b = filtered[j];
+            if (toDelete.includes(b.id as string)) continue;
+            const vb = (b.vector as Float32Array) || new Float32Array(EMBEDDING_DIM);
+            const sim = cosineSimilarity(va, vb);
+            if (sim >= 0.88) {
+              const merged: Record<string, unknown> = {
+                id: uuid(),
+                text: (a.text as string) + "\n" + (b.text as string),
+                tokens: tokenize((a.text as string) + " " + (b.text as string)).join(" "),
+                vector: va,
+                category: a.category as string,
+                scope,
+                conversation_id: a.conversation_id as string,
+                importance: Math.max(a.importance as number, b.importance as number),
+                timestamp: Math.min(a.timestamp as number, b.timestamp as number),
+                stored_at: a.stored_at as string,
+                metadata_json: a.metadata_json as string,
+                who: a.who as string,
+                what: a.what as string,
+                when: a.when as string,
+                where: a.where as string,
+                why: a.why as string,
+                how: a.how as string,
+                summary: (a.summary as string) + " | " + (b.summary as string),
+                confidence: (a.confidence as number + b.confidence as number) / 2,
+                temporal_type: a.temporal_type as string,
+                access_count: 0,
+                last_accessed_at: Date.now(),
+                compaction_rounds: (a.compaction_rounds as number || 0) + 1,
+                last_compacted_at: Date.now(),
+                original_source_count: (a.original_source_count as number || 1) + (b.original_source_count as number || 1),
+              };
+              toDelete.push(a.id as string, b.id as string);
+              toCreate.push(merged);
+              clustersFound++;
+              changed = true;
+            }
+          }
+        }
+
+        if (!dryRun && toDelete.length > 0) {
+          for (const id of toDelete) {
+            await this.table!.delete(`id = '${id}'`);
+            this.vectorIndex.delete(id);
+          }
+          await this.table!.add(toCreate);
+          deletedCount += toDelete.length;
+          createdCount += toCreate.length;
+        }
+      }
+    }
+
+    return { clusters_found: clustersFound, memories_deleted: deletedCount, memories_created: createdCount, dry_run: dryRun };
   }
 
   async graphRebuild(params: { agent_id?: string }): Promise<{
     agents_rebuilt: number;
     dangling_edges_cleaned: number;
   }> {
-    return this.call("graph_rebuild", params);
+    await this._ensureInit();
+    const scope = params.agent_id || this.scope;
+    let danglingCleaned = 0;
+
+    if (this.graph) {
+      const nodesToRemove: string[] = [];
+      this.graph.forEachNode((node, attrs) => {
+        if (attrs.scope === scope) {
+          try {
+            const memory = this.get({ memory_id: node, agent_id: scope });
+            if (!(memory as Record<string, unknown>).found) nodesToRemove.push(node);
+          } catch {
+            nodesToRemove.push(node);
+          }
+        }
+      });
+      for (const n of nodesToRemove) {
+        try { this.graph.dropNode(n); danglingCleaned++; } catch {}
+      }
+      await this._saveGraph();
+    }
+
+    const all = await this.table!.query().limit(5000).toArray();
+    const filtered = all.filter(r => (r.scope as string) === scope);
+
+    if (this.graph) {
+      for (const r of filtered) {
+        if (!this.graph.hasNode(r.id as string)) {
+          this.graph.addNode(r.id as string, { scope, category: r.category as string });
+        }
+      }
+      for (const r of filtered) {
+        const va = (r.vector as Float32Array) || new Float32Array(EMBEDDING_DIM);
+        const neighbors = await this._findRelated(r.id as string, va, 3);
+        for (const n of neighbors) {
+          try { this.graph.addEdge(r.id as string, n); } catch {}
+        }
+      }
+      await this._saveGraph();
+    }
+
+    return { agents_rebuilt: 1, dangling_edges_cleaned: danglingCleaned };
   }
 
   async decayScan(params: {
@@ -334,7 +829,49 @@ class SessionWorker {
     compacted: number;
     dry_run: boolean;
   }> {
-    return this.call("decay_scan", params);
+    await this._ensureInit();
+    const scope = params.agent_id || this.scope;
+    const dryRun = params.dry_run ?? false;
+    const limit = params.limit ?? 50;
+
+    const all = await this.table!.query().limit(5000).toArray();
+    const filtered = all.filter(r => (r.scope as string) === scope);
+
+    const maxAccess = Math.max(...filtered.map(r => r.access_count as number || 0), 1);
+    const staleMemories: Array<Record<string, unknown>> = [];
+    let deletedCount = 0, compactedCount = 0;
+
+    for (const r of filtered) {
+      const score = weibullScore(
+        r.stored_at as string,
+        r.importance as number,
+        r.access_count as number,
+        r.temporal_type as string,
+        maxAccess
+      );
+      if (score < 0.15 && (r.importance as number) < 0.4) {
+        staleMemories.push({ ...r, decay_score: score });
+      }
+    }
+
+    if (!dryRun && staleMemories.length > 0) {
+      const toDelete = staleMemories.slice(0, limit);
+      for (const m of toDelete) {
+        await this.forget({ memory_id: m.id as string });
+        deletedCount++;
+      }
+    }
+
+    if (params.also_compact && !dryRun) {
+      const compactResult = await this.compact({ dry_run: false, limit: 4, scopes: [scope] });
+      compactedCount = compactResult.memories_deleted;
+    }
+
+    if (params.also_graph_rebuild && !dryRun) {
+      await this.graphRebuild({ agent_id: scope });
+    }
+
+    return { stale_count: staleMemories.length, stale_memories: staleMemories, deleted: deletedCount, compacted: compactedCount, dry_run: dryRun };
   }
 
   async update(params: {
@@ -342,18 +879,77 @@ class SessionWorker {
     content?: string;
     metadata?: Record<string, unknown>;
   }): Promise<{ memory_id: string; updated: boolean }> {
-    return this.call("update", params);
+    await this._ensureInit();
+    const memory_id = params.memory_id;
+    try {
+      const results = await this.table!.search(memory_id, "id").limit(1).toArray();
+      if (!results.length) return { memory_id, updated: false };
+      const existing = results[0] as Record<string, unknown>;
+      const updated: Record<string, unknown> = { ...existing };
+      if (params.content !== undefined) {
+        updated.text = params.content;
+        updated.tokens = tokenize(params.content).join(" ");
+        const embedding = await getEmbedding(params.content);
+        updated.vector = embedding;
+        this.vectorIndex.set(memory_id, embedding);
+      }
+      if (params.metadata !== undefined) {
+        updated.metadata_json = JSON.stringify(params.metadata);
+      }
+      await this.table!.update([updated]);
+      return { memory_id, updated: true };
+    } catch {
+      return { memory_id, updated: false };
+    }
   }
 
   kill() {
-    try {
-      this.proc.kill();
-    } catch {}
+    this.db = null;
+    this.table = null;
+    this.graph = null;
+    this.vectorIndex.clear();
+    this.initialized = false;
   }
 }
 
 // Get or create session worker
-function getSessionWorker(sessionKey: string, pythonBin: string, workerPath: string, cwd: string): SessionWorker {
+function getSessionWorker(sessionKey: string): MemoryStore {
+  if (!sessionWorkers.has(sessionKey)) {
+    const scope = sessionKey.split(":")[1] || sessionKey || "default";
+    const w = new MemoryStore(scope);
+    sessionWorkers.set(sessionKey, w);
+  }
+  return sessionWorkers.get(sessionKey)!;
+}
+
+// ─── Session Worker (deprecated - kept for compatibility) ───────────────────────
+// Wraps MemoryStore to maintain the same interface
+
+class SessionWorker {
+  private store: MemoryStore;
+  constructor(_pythonBin: string, _workerPath: string, _cwd: string, sessionKey: string) {
+    const scope = sessionKey.split(":")[1] || sessionKey || "default";
+    this.store = new MemoryStore(scope);
+  }
+
+  async health(): Promise<{ status: string }> { return this.store.health(); }
+  async store(params: { content: string; agent_id?: string; conversation_id?: string; metadata?: Record<string, unknown> }): Promise<{ memory_id: string; conversation_id: string; dedup: boolean }> { return this.store.store(params); }
+  async recall(params: { query: string; agent_id?: string; max_results?: number; min_score?: number }): Promise<{ results: Array<Record<string, unknown>>; count: number; layers: { l1: number; l2: number; l3: number } }> { return this.store.recall(params); }
+  async forget(params: { memory_id: string }): Promise<{ memory_id: string; deleted: boolean }> { return this.store.forget(params); }
+  async get(params: { memory_id: string; agent_id?: string }): Promise<Record<string, unknown>> { return this.store.get(params); }
+  async stats(params: { agent_id?: string }): Promise<{ memory_count: number; bm25_doc_count: number; graph_node_count: number }> { return this.store.stats(params); }
+  async list(params: { agent_id?: string; category?: string; conversation_id?: string; limit?: number; offset?: number; sort?: string }): Promise<{ memories: Array<Record<string, unknown>>; count: number; offset: number; limit: number; agent_id: string }> { return this.store.list(params); }
+  async search(params: { query: string; agent_id?: string; limit?: number; offset?: number }): Promise<{ results: Array<Record<string, unknown>>; count: number }> { return this.store.search(params); }
+  async extract(params: { content: string }): Promise<{ category: string; importance: number; confidence: number; temporal_type: string; who: string; what: string; when: string; where: string; why: string; how: string; summary: string }> { return this.store.extract(params); }
+  async reset(params: { agent_id?: string; force?: boolean }): Promise<{ reset: boolean; deleted?: number; agent_id?: string; error?: string }> { return this.store.reset(params); }
+  async compact(params: { dry_run?: boolean; limit?: number; scopes?: string[] }): Promise<{ clusters_found: number; memories_deleted: number; memories_created: number; dry_run: boolean }> { return this.store.compact(params); }
+  async graphRebuild(params: { agent_id?: string }): Promise<{ agents_rebuilt: number; dangling_edges_cleaned: number }> { return this.store.graphRebuild(params); }
+  async decayScan(params: { dry_run?: boolean; limit?: number; also_compact?: boolean; also_graph_rebuild?: boolean; agent_id?: string }): Promise<{ stale_count: number; stale_memories: Array<Record<string, unknown>>; deleted: number; compacted: number; dry_run: boolean }> { return this.store.decayScan(params); }
+  async update(params: { memory_id: string; content?: string; metadata?: Record<string, unknown> }): Promise<{ memory_id: string; updated: boolean }> { return this.store.update(params); }
+  kill() { this.store.kill(); }
+}
+
+function getSessionWorker_old(sessionKey: string, pythonBin: string, workerPath: string, cwd: string): SessionWorker {
   if (!sessionWorkers.has(sessionKey)) {
     const w = new SessionWorker(pythonBin, workerPath, cwd, sessionKey);
     sessionWorkers.set(sessionKey, w);
@@ -908,21 +1504,21 @@ const memoryRecallPlugin = {
     const pythonBin = process.env.PYTHON_BIN || PYTHON_BIN;
     const cwd = pluginDir.replace(/\/src$/, "");
 
-    // Default worker for tools (global, single instance)
-    let _defaultWorker: SessionWorker | undefined;
+    // Default worker for tools (global, single instance) - now using MemoryStore
+    let _defaultWorker: MemoryStore | undefined;
     try {
-      _defaultWorker = new SessionWorker(pythonBin, workerPath, cwd, "default");
+      _defaultWorker = new MemoryStore("default");
       _defaultWorker.health().catch((e) => {
         api.logger.error(`[memory-recall] default worker failed to start: ${e.message}`);
       });
     } catch (e) {
       api.logger.error(`[memory-recall] default worker spawn failed: ${String(e)}`);
     }
-    api.logger.info(`[memory-recall] session-worker mode, python=${pythonBin}`);
+    api.logger.info(`[memory-recall] MemoryStore mode (pure TypeScript)`);
 
     const worker = _defaultWorker;
 
-    const getWorker = (sessionKey: string) => getSessionWorker(sessionKey, pythonBin, workerPath, cwd);
+    const getWorker = (sessionKey: string) => getSessionWorker(sessionKey);
 
     try {
       const runtimeObj = {
@@ -966,7 +1562,7 @@ const memoryRecallPlugin = {
           query: string; max_results?: number; agent_id?: string; min_score?: number;
         }) {
           try {
-            const data = await worker.recall({
+            const data = await worker!.recall({
               query: params.query,
               max_results: params.max_results ?? 5,
               agent_id: params.agent_id,
@@ -981,7 +1577,7 @@ const memoryRecallPlugin = {
             }
 
             const lines = data.results.map((r: Record<string, unknown>, i: number) =>
-              `${i + 1}. [${r.category || "memory"}] ${r.content} (score: ${((r.relevance_score as number ?? 0) * 100).toFixed(0)}%)`
+              `${i + 1}. [${r.category || "memory"}] ${r.text} (score: ${((r.relevance_score as number ?? 0) * 100).toFixed(0)}%)`
             );
             return {
               content: [{
@@ -1017,7 +1613,7 @@ const memoryRecallPlugin = {
           content: string; agent_id?: string; conversation_id?: string; metadata?: Record<string, unknown>;
         }) {
           try {
-            const data = await worker.store({
+            const data = await worker!.store({
               content: params.content,
               agent_id: params.agent_id,
               conversation_id: params.conversation_id,
@@ -1052,7 +1648,7 @@ const memoryRecallPlugin = {
         }),
         async execute(_toolCallId: string, params: { memory_id: string }) {
           try {
-            const data = await worker.forget({ memory_id: params.memory_id });
+            const data = await worker!.forget({ memory_id: params.memory_id });
             return {
               content: [{ type: "text", text: `Memory ${params.memory_id} deleted.` }],
               details: data,
@@ -1080,7 +1676,7 @@ const memoryRecallPlugin = {
         }),
         async execute(_toolCallId: string, params: { memory_id: string; agent_id?: string }) {
           try {
-            const data = await (worker as unknown as { get: Function }).get({ memory_id: params.memory_id, agent_id: params.agent_id });
+            const data = await worker!.get({ memory_id: params.memory_id, agent_id: params.agent_id });
             if (!(data as Record<string, unknown>).found) {
               return {
                 content: [{ type: "text", text: `Memory ${params.memory_id} not found.` }],
@@ -1091,7 +1687,7 @@ const memoryRecallPlugin = {
             return {
               content: [{
                 type: "text",
-                text: `[${d.category}][importance: ${d.importance}] ${d.content}\nID: ${d.id} | stored: ${d.stored_at}`,
+                text: `[${d.category}][importance: ${d.importance}] ${d.text}\nID: ${d.id} | stored: ${d.stored_at}`,
               }],
               details: data,
             };
@@ -1124,37 +1720,17 @@ const memoryRecallPlugin = {
           conversation_id?: string; agent_id?: string; since?: string; until?: string; limit?: number; summary_only?: boolean;
         }) {
           try {
-            const data = await (worker as unknown as { list: Function }).list({
+            const data = await worker!.list({
               conversation_id: params.conversation_id,
               agent_id: params.agent_id,
-              since: params.since,
-              until: params.until,
               limit: params.limit,
-              summary_only: params.summary_only,
+              offset: 0,
+              sort: "desc",
             });
             const d = data as Record<string, unknown>;
-            if (d.error) {
-              return {
-                content: [{ type: "text", text: `Browse failed: ${d.error}` }],
-                details: data,
-              };
-            }
-            if (params.summary_only && d.conversations) {
-              const convs = d.conversations as Array<Record<string, unknown>>;
-              const lines = convs.map((c) =>
-                `• [${c.conversation_id}] ${c.count} memories | cats: ${JSON.stringify(c.categories)} | last: ${c.last_at}`
-              );
-              return {
-                content: [{
-                  type: "text",
-                  text: `Found ${convs.length} conversations:\n${lines.join("\n")}`,
-                }],
-                details: data,
-              };
-            }
             const mems = (d.memories as Array<Record<string, unknown>>) || [];
             const lines = mems.map((m) =>
-              `[${m.category}][${m.stored_at}] ${String(m.content).slice(0, 100)}`
+              `[${m.category}][${m.stored_at}] ${String(m.text).slice(0, 100)}`
             );
             return {
               content: [{
@@ -1192,7 +1768,7 @@ const memoryRecallPlugin = {
           agent_id?: string; category?: string; conversation_id?: string; limit?: number; offset?: number; sort?: string;
         }) {
           try {
-            const data = await (worker as unknown as { list: Function }).browse({
+            const data = await worker!.list({
               agent_id: params.agent_id,
               category: params.category,
               conversation_id: params.conversation_id,
@@ -1202,7 +1778,7 @@ const memoryRecallPlugin = {
             });
             const mems = (data.memories as Array<Record<string, unknown>>) || [];
             const lines = mems.map((m) =>
-              `[${m.category}][${m.stored_at}] ${String(m.content).slice(0, 80)}`
+              `[${m.category}][${m.stored_at}] ${String(m.text).slice(0, 80)}`
             );
             return {
               content: [{ type: "text", text: `Listed ${mems.length} memories:\n${lines.join("\n")}` }],
@@ -1235,7 +1811,7 @@ const memoryRecallPlugin = {
           query: string; agent_id?: string; limit?: number; offset?: number;
         }) {
           try {
-            const data = await (worker as unknown as { search: Function }).search({
+            const data = await worker!.search({
               query: params.query,
               agent_id: params.agent_id,
               limit: params.limit,
@@ -1243,7 +1819,7 @@ const memoryRecallPlugin = {
             });
             const results = (data.results as Array<Record<string, unknown>>) || [];
             const lines = results.map((r) =>
-              `[score:${r.score}][${r.category}] ${String(r.content).slice(0, 80)}`
+              `[score:${r.score}][${r.category}] ${String(r.text).slice(0, 80)}`
             );
             return {
               content: [{ type: "text", text: `Found ${results.length} results:\n${lines.join("\n")}` }],
@@ -1271,7 +1847,7 @@ const memoryRecallPlugin = {
         }),
         async execute(_toolCallId: string, params: { content: string }) {
           try {
-            const data = await (worker as unknown as { extract: Function }).extract({ content: params.content });
+            const data = await worker!.extract({ content: params.content });
             if ((data as Record<string, unknown>).error) {
               return { content: [{ type: "text", text: `Extract failed: ${(data as Record<string, unknown>).error}` }], details: data };
             }
@@ -1284,8 +1860,8 @@ const memoryRecallPlugin = {
               details: data,
             };
           } catch (err) {
-            api.logger.error(`[memory-recall] extract error: ${String(err)}`);
-            return { content: [{ type: "text", text: `Extract failed: ${String(err)}` }], details: { error: String(err) } };
+            api.logger.error("[memory-recall] extract error: " + String(err));
+            return { content: [{ type: "text", text: "Extract failed: " + String(err) }], details: { error: String(err) } };
           }
         },
       },
@@ -1303,14 +1879,18 @@ const memoryRecallPlugin = {
         }),
         async execute(_toolCallId: string, params: { agent_id?: string; force?: boolean }) {
           try {
-            const data = await (worker as unknown as { reset: Function }).reset({ agent_id: params.agent_id, force: params.force });
+            const data = await worker!.reset({ agent_id: params.agent_id, force: params.force });
             if (!(data as Record<string, unknown>).reset) {
-              return { content: [{ type: "text", text: `Reset aborted: ${(data as Record<string, unknown>).error || "need force:true"}` }], details: data };
+              const errorMsg = (data as Record<string, unknown>).error || "need force:true";
+              return { content: [{ type: "text", text: "Reset aborted: " + errorMsg }], details: data };
             }
-            return { content: [{ type: "text", text: `Reset complete: ${(data as Record<string, unknown>).deleted} memories deleted.` }], details: data };
+            const deletedCount = (data as Record<string, unknown>).deleted || 0;
+            return { content: [{ type: "text", text: "Reset complete: " + deletedCount + " memories deleted." }], details: data };
           } catch (err) {
-            api.logger.error(`[memory-recall] reset error: ${String(err)}`);
-            return { content: [{ type: "text", text: `Reset failed: ${String(err)}` }], details: { error: String(err) } };
+            const errStr = String(err);
+            const errObj = { error: errStr };
+            api.logger.error("[memory-recall] reset error: " + errStr);
+            return { content: [{ type: "text", text: "Reset failed: " + errStr }], details: errObj };
           }
         },
       },
@@ -1327,21 +1907,21 @@ const memoryRecallPlugin = {
         }),
         async execute(_toolCallId: string, params: { agent_id?: string }) {
           try {
-            const data = await worker.stats({ agent_id: params.agent_id });
-            const cats = (data as Record<string, unknown>).categories as Record<string, number> || {};
-            const tiers = (data as Record<string, unknown>).tiers as Record<string, number> || {};
-            const temp = (data as Record<string, unknown>).temporal_types as Record<string, number> || {};
+            const data = await worker!.stats({ agent_id: params.agent_id });
+            const d = data as Record<string, unknown>;
+            const mc = d.memory_count || 0;
+            const gn = d.graph_node_count || 0;
+            const bc = d.bm25_doc_count || 0;
             const lines = [
-              `memories: ${(data as Record<string, unknown>).memory_count} | graph nodes: ${(data as Record<string, unknown>).graph_node_count}`,
-              `categories: ${JSON.stringify(cats)}`,
-              `tiers: ${JSON.stringify(tiers)}`,
-              `temporal: ${JSON.stringify(temp)}`,
-              `avg_importance: ${(data as Record<string, unknown>).avg_importance} | avg_confidence: ${(data as Record<string, unknown>).avg_confidence}`,
+              "memories: " + mc + " | graph nodes: " + gn,
+              "bm25_doc_count: " + bc,
             ];
             return { content: [{ type: "text", text: lines.join("\n") }], details: data };
           } catch (err) {
-            api.logger.error(`[memory-recall] stats error: ${String(err)}`);
-            return { content: [{ type: "text", text: `Stats failed: ${String(err)}` }], details: { error: String(err) } };
+            const errStr = String(err);
+            const errObj = { error: errStr };
+            api.logger.error("[memory-recall] stats error: " + errStr);
+            return { content: [{ type: "text", text: "Stats failed: " + errStr }], details: errObj };
           }
         },
       },
@@ -1362,7 +1942,7 @@ const memoryRecallPlugin = {
           memory_id: string; content?: string; metadata?: Record<string, unknown>;
         }) {
           try {
-            const data = await worker.update({
+            const data = await worker!.update({
               memory_id: params.memory_id,
               content: params.content,
               metadata: params.metadata,
@@ -1499,11 +2079,11 @@ const memoryRecallPlugin = {
             const text = extractText(msg.content);
             if (text && text.length > 10) {
               const metadata = { role: "assistant" };
-              worker.store({
+              worker!.store({
                 content: text,
                 conversation_id: event.sessionKey ?? event.conversationId,
                 metadata,
-              }, sessionKey).catch(err => {
+              }).catch(err => {
                 api.logger.warn(`[memory-recall] agent_end store failed: ${String(err)}`);
               });
               if (!sessionBuffers.has(sessionKey)) {
