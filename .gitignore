@@ -3,6 +3,15 @@ __pycache__/
 *.pyc
 .pytest_cache/
 *.egg-info/
+# Legacy Python modules (replaced by pure TypeScript MemoryStore)
+src/**/*.py
+src/**/*.pyc
+src/__pycache__/
+src/core/__pycache__/
+dict_maintenance.py
+pool_router.py
+deploy.sh
+start.sh
 .venv/
 venv/
 .env
