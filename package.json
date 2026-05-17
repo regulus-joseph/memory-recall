@@ -19,7 +19,6 @@
     "@lancedb/lancedb": "^0.27.2",
     "@lancedb/lancedb-linux-x64-gnu": "^0.27.2",
     "@sinclair/typebox": "^0.34.49",
-    "bm25": "^0.1.1",
     "graphology": "^0.26.0",
     "nodejieba": "^3.5.8"
   },
@@ -29,7 +28,7 @@
   },
   "changelog": [
     {
-"version": "0.7.0",
+      "version": "0.7.0",
       "date": "2026-05-10",
       "changes": [
         "HTTP pool mode (USE_HTTP_POOL=1) with session affinity",

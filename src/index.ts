@@ -17,9 +17,9 @@ import { createRequire } from "node:module";
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
 import { Type } from "@sinclair/typebox";
 import type { Connection, Table } from "@lancedb/lancedb";
+import { makeArrowTable } from "@lancedb/lancedb";
 import Graph from "graphology";
 import nodejieba from "nodejieba";
-import BM25 from "bm25";
 import { homedir } from "node:os";
 import { existsSync, mkdirSync, readFileSync, writeFileSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
@@ -94,7 +94,7 @@ interface MemoryRecord {
 const EMBEDDING_URL = process.env.EMBEDDING_URL || "http://localhost:11434/api/embeddings";
 const EMBEDDING_MODEL = process.env.EMBEDDING_MODEL || "bge-m3";
 const OLLAMA_URL = process.env.OLLAMA_URL || "http://localhost:11434";
-const LLM_MODEL = process.env.LLM_MODEL || "qwen2.5:7b";
+const LLM_MODEL = process.env.LLM_MODEL || "qwen3.5:4b";
 const DATA_DIR = process.env.DATA_DIR || join(homedir(), ".memory-recall", "data");
 const EMBEDDING_DIM = 1024;
 
@@ -230,10 +230,47 @@ function weibullScore(
 }
 
 function scoreBM25(query: string, documents: string[]): number[] {
-  const tokenized = documents.map(d => tokenize(d));
+  if (documents.length === 0 || !query.trim()) return documents.map(() => 0);
+
+  const docs = documents.map(d => tokenize(d));
   const queryTokens = tokenize(query);
-  const bm25 = new BM25(tokenized);
-  return bm25.search(queryTokens);
+  if (queryTokens.length === 0) return documents.map(() => 0);
+
+  const N = docs.length;
+  const avgdl = docs.reduce((s, d) => s + d.length, 0) / N;
+  const k1 = 1.2;
+  const b = 0.75;
+
+  // doc frequencies
+  const df: Map<string, number> = new Map();
+  for (const doc of docs) {
+    const seen = new Set<string>();
+    for (const t of doc) if (!seen.has(t)) { seen.add(t); df.set(t, (df.get(t) || 0) + 1); }
+  }
+
+  // IDF: log((N - df + 0.5) / (df + 0.5))
+  const idf: Map<string, number> = new Map();
+  for (const [t, f] of df) {
+    idf.set(t, Math.log((N - f + 0.5) / (f + 0.5) + 1e-8));
+  }
+
+  const scores: number[] = new Array(N).fill(0);
+  for (let i = 0; i < N; i++) {
+    let score = 0;
+    const doc = docs[i];
+    const docLen = doc.length;
+    const tf: Map<string, number> = new Map();
+    for (const t of doc) tf.set(t, (tf.get(t) || 0) + 1);
+
+    for (const qt of queryTokens) {
+      const idfVal = idf.get(qt) || 0;
+      const ft = tf.get(qt) || 0;
+      score += idfVal * (ft * (k1 + 1)) / (ft + k1 * (1 - b + b * docLen / (avgdl + 1e-8)));
+    }
+    scores[i] = score;
+  }
+
+  return scores;
 }
 
 // ─── Memory Store ──────────────────────────────────────────────────────────────
@@ -258,36 +295,49 @@ class MemoryStore {
       const dbPath = getLanceDBPath(this.scope);
       this.db = await connect(dbPath);
 
-      const schema: Array<{ name: string; type: unknown }> = [
-        { name: "vector", type: new Float32Array(0).constructor },
-        { name: "text", type: String },
-        { name: "tokens", type: String },
-        { name: "category", type: String },
-        { name: "scope", type: String },
-        { name: "conversation_id", type: String },
-        { name: "importance", type: Number },
-        { name: "timestamp", type: Number },
-        { name: "stored_at", type: String },
-        { name: "metadata_json", type: String },
-        { name: "who", type: String },
-        { name: "what", type: String },
-        { name: "when", type: String },
-        { name: "where", type: String },
-        { name: "why", type: String },
-        { name: "how", type: String },
-        { name: "summary", type: String },
-        { name: "confidence", type: Number },
-        { name: "temporal_type", type: String },
-        { name: "access_count", type: Number },
-        { name: "last_accessed_at", type: Number },
-        { name: "compaction_rounds", type: Number },
-        { name: "last_compacted_at", type: Number },
-        { name: "original_source_count", type: Number },
+      const schema = [
+        { name: "memory_id", type: "string" },
+        { name: "vector", type: "vector<float32,1024>" },
+        { name: "text", type: "string" },
+        { name: "tokens", type: "string" },
+        { name: "category", type: "string" },
+        { name: "scope", type: "string" },
+        { name: "conversation_id", type: "string" },
+        { name: "importance", type: "float32" },
+        { name: "timestamp", type: "float64" },
+        { name: "stored_at", type: "string" },
+        { name: "metadata_json", type: "string" },
+        { name: "who", type: "string" },
+        { name: "what", type: "string" },
+        { name: "when", type: "string" },
+        { name: "where", type: "string" },
+        { name: "why", type: "string" },
+        { name: "how", type: "string" },
+        { name: "summary", type: "string" },
+        { name: "confidence", type: "float32" },
+        { name: "temporal_type", type: "string" },
+        { name: "access_count", type: "int32" },
+        { name: "last_accessed_at", type: "float64" },
+        { name: "compaction_rounds", type: "int32" },
+        { name: "last_compacted_at", type: "float64" },
+        { name: "original_source_count", type: "int32" },
       ];
 
-      this.table = await this.db.createTable("memories", schema as unknown as Record<string, unknown>[]).catch(async () => {
-        return await this.db!.openTable("memories");
-      });
+      try {
+        this.table = await this.db.openTable("memories");
+        this.initialized = true;
+        return;
+      } catch {
+        // Table doesn't exist, create it
+      }
+
+      try {
+        this.table = await this.db.createTable("memories", [
+          { memory_id: "__init__", text: "__init__", tokens: "__init__", category: "other", scope: this.scope, conversation_id: "init", importance: 0, timestamp: 0, stored_at: "", metadata_json: "{}", who: "", what: "", when: "", where: "", why: "", how: "", summary: "", confidence: 0, temporal_type: "", access_count: 0, last_accessed_at: 0, compaction_rounds: 0, last_compacted_at: 0, original_source_count: 0, vector: new Float32Array(EMBEDDING_DIM) },
+        ]);
+      } catch (e) {
+        throw new Error("Memory table initialization failed: " + String(e));
+      }
 
       this.graph = new Graph();
       const graphPath = getGraphPath(this.scope);
@@ -318,10 +368,8 @@ class MemoryStore {
   }
 
   private async _buildIndex(): Promise<void> {
-    if (!this.table) return;
-    try {
-      await this.table.createIndex("tokens", "BM25");
-    } catch {}
+    // BM25 is done in-memory with our own implementation
+    // No LanceDB index needed for BM25 reranking
   }
 
   async health(): Promise<{ status: string }> {
@@ -357,8 +405,8 @@ class MemoryStore {
 
     const now = Date.now();
     const memory_id = uuid();
-    const record: Record<string, unknown> = {
-      id: memory_id,
+    const record = {
+      memory_id,
       text: content,
       tokens,
       vector: embedding,
@@ -385,7 +433,7 @@ class MemoryStore {
       original_source_count: 1,
     };
 
-    await this.table!.add([record]);
+    await this.table!.add(makeArrowTable([record], { vector: { dimension: EMBEDDING_DIM } }));
     this.vectorIndex.set(memory_id, embedding);
 
     if (this.graph) {
@@ -422,11 +470,11 @@ class MemoryStore {
     try {
       const all = await this.table.query().limit(1000).toArray();
       const scored = all
-        .map(r => ({ id: r.id as string, sim: cosineSimilarity(embedding, (r.vector as Float32Array) || new Float32Array(EMBEDDING_DIM)) }))
-        .filter(x => x.id !== memoryId && x.sim > 0.7)
+        .map(r => ({ memory_id: r.memory_id as string, sim: cosineSimilarity(embedding, (r.vector as Float32Array) || new Float32Array(EMBEDDING_DIM)) }))
+        .filter(x => x.memory_id !== memoryId && x.sim > 0.7)
         .sort((a, b) => b.sim - a.sim)
         .slice(0, limit);
-      return scored.map(s => s.id);
+      return scored.map(s => s.memory_id);
     } catch {
       return [];
     }
@@ -497,13 +545,13 @@ class MemoryStore {
     const resultMap = new Map<string, Record<string, unknown> & { relevance_score: number }>();
 
     for (const c of candidates) {
-      expanded.add(c.id as string);
-      resultMap.set(c.id as string, c);
+      expanded.add(c.memory_id as string);
+      resultMap.set(c.memory_id as string, c);
     }
 
     for (const c of candidates) {
       try {
-        const neighbors = this.graph.neighbors(c.id as string);
+        const neighbors = this.graph.neighbors(c.memory_id as string);
         for (const n of neighbors) {
           if (!expanded.has(n)) {
             expanded.add(n);
@@ -523,7 +571,7 @@ class MemoryStore {
     await this._ensureInit();
     const memory_id = params.memory_id;
     try {
-      await this.table!.delete(`id = '${memory_id}'`);
+      await this.table!.delete(`memory_id = '${memory_id}'`);
       this.vectorIndex.delete(memory_id);
       if (this.graph) {
         try { this.graph.dropNode(memory_id); } catch {}
@@ -538,7 +586,7 @@ class MemoryStore {
   async get(params: { memory_id: string; agent_id?: string }): Promise<Record<string, unknown>> {
     await this._ensureInit();
     try {
-      const results = await this.table!.search(params.memory_id, "id").limit(1).toArray();
+      const results = await this.table!.search(params.memory_id, "memory_id").limit(1).toArray();
       if (!results.length) return { found: false };
       const r = results[0] as Record<string, unknown>;
       await this.table!.update([{
@@ -714,12 +762,12 @@ class MemoryStore {
           const va = (a.vector as Float32Array) || new Float32Array(EMBEDDING_DIM);
           for (let j = i + 1; j < filtered.length; j++) {
             const b = filtered[j];
-            if (toDelete.includes(b.id as string)) continue;
+            if (toDelete.includes(b.memory_id as string)) continue;
             const vb = (b.vector as Float32Array) || new Float32Array(EMBEDDING_DIM);
             const sim = cosineSimilarity(va, vb);
             if (sim >= 0.88) {
               const merged: Record<string, unknown> = {
-                id: uuid(),
+                memory_id: uuid(),
                 text: (a.text as string) + "\n" + (b.text as string),
                 tokens: tokenize((a.text as string) + " " + (b.text as string)).join(" "),
                 vector: va,
@@ -745,7 +793,7 @@ class MemoryStore {
                 last_compacted_at: Date.now(),
                 original_source_count: (a.original_source_count as number || 1) + (b.original_source_count as number || 1),
               };
-              toDelete.push(a.id as string, b.id as string);
+              toDelete.push(a.memory_id as string, b.memory_id as string);
               toCreate.push(merged);
               clustersFound++;
               changed = true;
@@ -755,7 +803,7 @@ class MemoryStore {
 
         if (!dryRun && toDelete.length > 0) {
           for (const id of toDelete) {
-            await this.table!.delete(`id = '${id}'`);
+            await this.table!.delete(`memory_id = '${id}'`);
             this.vectorIndex.delete(id);
           }
           await this.table!.add(toCreate);
@@ -799,15 +847,12 @@ class MemoryStore {
 
     if (this.graph) {
       for (const r of filtered) {
-        if (!this.graph.hasNode(r.id as string)) {
-          this.graph.addNode(r.id as string, { scope, category: r.category as string });
-        }
-      }
-      for (const r of filtered) {
-        const va = (r.vector as Float32Array) || new Float32Array(EMBEDDING_DIM);
-        const neighbors = await this._findRelated(r.id as string, va, 3);
-        for (const n of neighbors) {
-          try { this.graph.addEdge(r.id as string, n); } catch {}
+if (!this.graph.hasNode(r.memory_id as string)) {
+          this.graph.addNode(r.memory_id as string, { scope, category: r.category as string });
+
+          const neighbors = await this._findRelated(r.memory_id as string, va, 3);
+
+          try { this.graph.addEdge(r.memory_id as string, n); } catch {}
         }
       }
       await this._saveGraph();
@@ -857,7 +902,7 @@ class MemoryStore {
     if (!dryRun && staleMemories.length > 0) {
       const toDelete = staleMemories.slice(0, limit);
       for (const m of toDelete) {
-        await this.forget({ memory_id: m.id as string });
+        await this.forget({ memory_id: m.memory_id as string });
         deletedCount++;
       }
     }
@@ -882,7 +927,7 @@ class MemoryStore {
     await this._ensureInit();
     const memory_id = params.memory_id;
     try {
-      const results = await this.table!.search(memory_id, "id").limit(1).toArray();
+      const results = await this.table!.search(memory_id, "memory_id").limit(1).toArray();
       if (!results.length) return { memory_id, updated: false };
       const existing = results[0] as Record<string, unknown>;
       const updated: Record<string, unknown> = { ...existing };
@@ -1687,7 +1732,7 @@ const memoryRecallPlugin = {
             return {
               content: [{
                 type: "text",
-                text: `[${d.category}][importance: ${d.importance}] ${d.text}\nID: ${d.id} | stored: ${d.stored_at}`,
+                text: `[${d.category}][importance: ${d.importance}] ${d.text}\nID: ${d.memory_id} | stored: ${d.stored_at}`,
               }],
               details: data,
             };
@@ -2216,3 +2261,5 @@ const memoryRecallPlugin = {
 };
 
 export default memoryRecallPlugin;
+
+export { MemoryStore, type MemoryStore };
