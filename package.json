@@ -28,7 +28,7 @@
   },
   "changelog": [
     {
-      "version": "0.7.0",
+"version": "0.8.0",
       "date": "2026-05-10",
       "changes": [
         "HTTP pool mode (USE_HTTP_POOL=1) with session affinity",

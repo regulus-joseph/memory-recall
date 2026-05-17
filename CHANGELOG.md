@@ -2,6 +2,22 @@
 
 All notable changes to memory-recall are documented here.
 
+## v0.8.0 (2026-05-17)
+
+### MemoryStore Fixes
+- **Field name fix**: LanceDB schema uses `memory_id` not `id` (id is reserved by LanceDB internally)
+- **makeArrowTable**: Store uses `makeArrowTable()` for proper Arrow typed data instead of plain objects
+- **Table creation**: Creates table with dummy row to infer schema, then uses makeArrowTable for all subsequent adds
+- **Search/delete/compact**: All use `memory_id` column, not `id`
+
+### Model Update
+- **LLM model**: Changed from `qwen2.5:7b` to `qwen3.5:4b` (local standard)
+
+### New Tests
+- **TS smoke tests**: `tests/memory-store-smoke.test.mjs` - pure TypeScript MemoryStore unit tests
+
+---
+
 ## v0.7.0 (2026-05-17)
 
 ### Breaking Change: Pure TypeScript (No Python Worker)
