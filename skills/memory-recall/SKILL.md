@@ -1,142 +1,147 @@
 ---
 name: memory-recall
-description: Long-term memory system for OpenClaw agents. Use whenever user mentions past conversations, previous decisions, projects, or asks "do you remember...". Provides store, recall, browse, list, search, get, extract, update, forget, and stats on persistent agent memories.
+description: L1/L2/L3 cascade memory recall plugin for OpenClaw. Per-agent LanceDB (vector + BM25 + graphology). Weibull decay. Progressive compaction. Use when user mentions past conversations, previous decisions, projects, or asks "do you remember...".
 trigger: /memory
 ---
 
 # Memory Recall Skill
 
-Persistent, per-agent long-term memory backed by LanceDB (vector + BM25 + graph).
-
-## Architecture
-
 Three-layer retrieval cascade (L1 → L2 → L3):
-- **L1 (vector)**: bge-m3 embedding via Ollama — semantic similarity search
-- **L2 (BM25)**: jieba keyword FTS — fast exact-match, no embedding cost
-- **L3 (graph)**: NetworkX expansion from top-L1/L2 results — finds related memories via session/category/temporal edges
+- **L1 (vector)**: bge-m3 embedding via Ollama (1024-dim) — semantic similarity
+- **L2 (BM25)**: jieba Chinese tokenization — fast keyword match, no embedding cost
+- **L3 (graph)**: graphology expansion from top L1/L2 results — finds related memories via session/category/temporal edges
 
-Retrieval → score fusion (0.5×L1 + 0.5×L2 + 0.4×L3) → ranked output.
+Storage: LanceDB (vector table per agent/scope) + BM25 index + graphology graph.
 
-Storage: LanceDB vector table + BM25 FTS index + NetworkX graph (session edges, category overlap, temporal links).
-
-Decay engine: Weibull composite (recency × frequency × importance). Compactor: cosine clustering merges similar stale memories.
+Decay: Weibull composite score (recency × frequency × intrinsic importance). Core memories (importance ≥ 0.7) are protected.
 
 ## When to Use
 
 - User asks about past conversations, decisions, or events
 - User says "remember when...", "do you recall...", "earlier we talked about..."
 - User mentions a project, task, or topic and you need context
-- Before starting a new task, check if relevant memories exist with `memory_recall`
-- When user wants to review everything about a project → `memory_browse`
-- When analyzing new information before deciding to store → `memory_extract`
+- Before starting a new task, check relevant memories with `mr_memory_recall`
+- User wants to review project history → `memory_browse`
+- Analyzing new info before deciding to store → `memory_extract`
 
-## Available Tools
+## Tools
 
-### memory_recall
-Semantic hybrid recall: L1 vector + L2 BM25 + L3 graph cascade. Best for natural language queries.
+### mr_memory_recall
+Hybrid L1/L2/L3 recall for natural language queries.
 ```
-query: "what did the user tell me about their project deadline"
+query: "what did user say about their deadline"
 max_results: 3
-min_score: 0.15   # filter low-relevance results (default 0, recommended 0.15-0.2)
+min_score: 0.15
 ```
-Returns scored memories with layer info. Access count is tracked — frequently recalled memories resist decay.
+
+### mr_memory_store
+Store memory with auto LLM extraction (6w + category + confidence + temporal_type).
+```
+content: "用户计划5月15日去深圳出差3天"
+```
+
+### memory_forget
+Delete memory (core memories protected, importance ≥ 0.7).
+```
+memory_id: "abc-123-..."
+```
+
+### mr_memory_get
+Get exact memory by ID.
+```
+memory_id: "abc-123-..."
+```
 
 ### memory_browse
-Browse memories by time range. conversation_id is auto-set via sessionKey (stable across gateway restarts).
+Browse by time range or conversation.
 ```
 since: "2026-04-01T00:00:00"
 until: "2026-05-01T00:00:00"
-summary_only: true  # conversation summaries instead of full list
+summary_only: true
 limit: 50
 ```
 
-### memory_search
-Fast BM25/jieba keyword search. No embedding cost — good for quick keyword matches.
+### memory_list
+Paginated listing with filters.
+```
+category: "fact"
+sort: "desc"
+limit: 20
+offset: 0
+```
+
+### mr_memory_search
+Fast BM25/jieba keyword search (no embedding cost).
 ```
 query: "deadline 深圳"
 limit: 20
 ```
 
-### memory_list
-Paginated memory listing with filters.
-```
-category: "events"  # optional filter
-sort: "desc"  # or "asc"
-limit: 20
-offset: 0
-```
-Note: conversation_id filtering uses sessionKey format (e.g. sessionKeys are auto-assigned per openclaw session).
-
-### memory_get
-Retrieve exact memory by ID.
-```
-memory_id: "abc-123-..."
-```
-
 ### memory_extract
-Analyze any text with LLM extraction to get structured fields (category, importance, 6W entities, temporal type) BEFORE deciding to store. Use to pre-filter.
+LLM extraction on any text — preview structured fields before storing.
 ```
 content: "用户告诉我他们下周要去深圳出差"
 ```
 
-### memory_store
-Store a memory. Auto-extracts category, importance, 6W entities. Auto-assigns sessionKey as conversation_id.
-```
-content: "用户计划5月15日去深圳出差3天"
-conversation_id: "proj-alpha"  # optional, auto-set if omitted
-metadata: {}  # optional extra metadata
-```
-
 ### memory_update
-Update content or metadata of an existing memory.
+Update content or metadata.
 ```
 memory_id: "abc-123-..."
-content: "updated content here"
+content: "updated content"
 metadata: { "status": "done" }
 ```
 
-### memory_forget
-Delete a memory permanently.
+### memory_reset
+DANGER: Delete ALL memories for an agent.
 ```
-memory_id: "abc-123-..."
+agent_id: "default"
+force: true
 ```
 
 ### memory_stats
-Storage statistics: count, categories, tiers, temporal types, avg importance/confidence.
-```
-agent_id: "default"  # optional, omit for global
-```
-
-### memory_reset
-DANGER: Permanently delete all memories for an agent.
+Storage stats: count, categories, tiers, temporal types.
 ```
 agent_id: "default"
-force: true  # required to confirm
 ```
 
-## Memory Categories
+### memory_worker_status
+Show all active session workers and health.
 
-`profile` — user personal info (name, location, job)
-`preferences` — likes, dislikes, habits
-`entities` — people, products, brands mentioned
-`events` — things that happened
-`cases` — problems solved, methods tried
-`patterns` — recurring habits, schedules
-`other` — uncategorized
+### memory_worker_restart
+Kill and restart worker for a specific session.
+
+## Categories
+
+| Category | Description |
+|----------|-------------|
+| `fact` | Objective facts (config, path, version) |
+| `preference` | User preferences (style, habit, tool choice) |
+| `conversation` | Conversational exchanges |
+| `task` | To-do / action items |
+| `other` | Anything not fitting above |
 
 ## Tier System
 
-Memories are auto-classified by importance:
-- **core** (importance ≥ 0.7): immune to decay deletion
-- **working** (0.4–0.7): normal priority
-- **peripheral** (< 0.4): first to be pruned by decay scan
+| Tier | Importance | Behavior |
+|------|------------|-----------|
+| **core** | ≥ 0.7 | Immune to decay deletion |
+| **working** | 0.4–0.7 | Normal priority |
+| **peripheral** | < 0.4 | First to be pruned |
+
+## Temporal Type
+
+| Type | Half-life | Meaning |
+|------|-----------|---------|
+| `dynamic` | 30 days | Rapidly changing |
+| `static` | 180 days | Near permanent |
+| `recurring` | 90 days | Cyclic patterns |
+| `ephemeral` | 7 days | Soon obsolete |
 
 ## Tips
 
-- Store memories with conversation_id to enable `memory_browse` by project
-- Use `memory_extract` before `memory_store` to preview what category/importance the system assigns
-- `memory_recall` tracks access_count — frequently recalled memories resist decay
-- `memory_browse` with `summary_only: true` is best for getting project overviews fast
-- Set `min_score: 0.15` in recall to filter out low-relevance cross-talk noise
-- `sessionKey` (not gateway's conversationId) is used as conversation_id — stable across gateway restarts
-- Decay scan runs every 24h (configurable via decayIntervalHours) and protects core memories
+- `sessionKey` is used as conversation_id — stable across gateway restarts
+- `memory_extract` before `mr_memory_store` to preview category/importance
+- Frequently recalled memories track access_count — resists decay
+- `memory_browse` with `summary_only: true` for fast project overviews
+- Set `min_score: 0.15` in recall to filter low-relevance noise
+- Decay runs every 24h (configurable), core memories protected
