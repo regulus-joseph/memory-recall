@@ -482,11 +482,11 @@ npm run test:smoke
 
 | Version | Date | Changes |
 |---------|------|---------|
-| 0.8.0 | 2026-05-17 | LanceDB field name fix (memory_id); makeArrowTable; qwen3.5:4b model |
-| 0.7.0 | 2026-05-17 | Pure TypeScript (no Python worker); LanceDB + graphology + nodejieba + bm25 |
-| 0.6.0 | 2026-05-16 | Per-session workers; worker_status/restart tools |
-| 0.5.0 | 2026-05-10 | HTTP pool mode; session buffer; session_end flush |
-| 0.4.0 | 2026-04-25 | LanceDB; Weibull decay; Compactor; Tier protection |
-| 0.3.0 | 2026-04-24 | TS plugin + Python server; LLM extraction |
-| 0.2.0 | 2026-04-22 | before_agent_start hook |
-| 0.1.0 | 2026-04-22 | Initial: Qdrant + bge-m3 |
+| **0.8.0** | 2026-05-17 | **LanceDB schema fix** (`memory_id` not `id`); `makeArrowTable()` for Arrow typed data; table init with dummy row; **qwen3.5:4b** model (was qwen2.5:7b); **hook system fixed** (before_prompt_build uses `event.prompt`, message_received works for all channels); recall cache with TTL injection; 25 unit tests passing |
+| **0.7.0** | 2026-05-17 | **Pure TypeScript rewrite** — no Python worker; LanceDB + graphology + nodejieba + bm25; direct Ollama API for embedding + LLM extraction; per-session `MemoryStore` instances |
+| 0.6.0 | 2026-05-16 | Per-session workers architecture; `memory_worker_status` / `memory_worker_restart` tools |
+| 0.5.0 | 2026-05-10 | HTTP pool mode (`USE_HTTP_POOL=1`); session buffer + `session_end` hook flush; 12 tools |
+| 0.4.0 | 2026-04-25 | LanceDB migration (replaced Qdrant); Weibull decay engine; Compactor clustering; Tier protection |
+| 0.3.0 | 2026-04-24 | TS plugin + Python server; async LLM extraction (6w + category + confidence); MLP 6-category |
+| 0.2.0 | 2026-04-22 | `before_agent_start` hook auto-injection |
+| 0.1.0 | 2026-04-22 | Initial: Qdrant + Ollama bge-m3 embedding; `recall_memories` tool; `message_received`/`agent_end` auto-store |
