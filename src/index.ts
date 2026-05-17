@@ -333,7 +333,7 @@ class MemoryStore {
 
       try {
         this.table = await this.db.createTable("memories", [
-          { memory_id: "__init__", text: "__init__", tokens: "__init__", category: "other", scope: this.scope, conversation_id: "init", importance: 0, timestamp: 0, stored_at: "", metadata_json: "{}", who: "", what: "", when: "", where: "", why: "", how: "", summary: "", confidence: 0, temporal_type: "", access_count: 0, last_accessed_at: 0, compaction_rounds: 0, last_compacted_at: 0, original_source_count: 0, vector: new Float32Array(EMBEDDING_DIM) },
+          { memory_id: "__init__", text: "__init__", tokens: "__init__", category: "other", scope: this.scope, conversation_id: "init", importance: 0, timestamp: 0, stored_at: "", metadata_json: "{}", who: "", what: "", when: "", where: "", why: "", how: "", summary: "", confidence: 0, temporal_type: "", access_count: 0, last_accessed_at: 0, compaction_rounds: 0, last_compacted_at: 0, original_source_count: 0, vector: Array(EMBEDDING_DIM).fill(0) },
         ]);
       } catch (e) {
         throw new Error("Memory table initialization failed: " + String(e));
@@ -388,21 +388,18 @@ class MemoryStore {
     const scope = params.agent_id || this.scope;
     const conversation_id = params.conversation_id || uuid();
 
-    const dedup = await this._checkDedup(content, scope);
-
-    const embedding = await getEmbedding(content);
-    const tokens = tokenize(content).join(" ");
-    let extracted: ExtractedFields;
-    try {
-      extracted = await extractFields(content);
-    } catch {
-      extracted = {
+    const [embedding, extracted] = await Promise.all([
+      getEmbedding(content),
+      extractFields(content).catch(() => ({
         category: "other", importance: 0.5, confidence: 0.5,
         temporal_type: "dynamic", who: "", what: "", when: "",
         where: "", why: "", how: "", summary: content.slice(0, 200),
-      };
-    }
+      })),
+    ]);
 
+    const dedup = await this._checkDedup(content, scope, embedding);
+
+    const tokens = tokenize(content).join(" ");
     const now = Date.now();
     const memory_id = uuid();
     const record = {
@@ -451,13 +448,13 @@ class MemoryStore {
     return { memory_id, conversation_id, dedup };
   }
 
-  private async _checkDedup(content: string, scope: string): Promise<boolean> {
+  private async _checkDedup(content: string, scope: string, newEmbedding: Float32Array): Promise<boolean> {
     try {
       const results = await this.table!.search(content, "tokens").limit(5).toArray();
       for (const r of results as Record<string, unknown>[]) {
         const similarity = cosineSimilarity(
           (r.vector as Float32Array) || new Float32Array(EMBEDDING_DIM),
-          await getEmbedding(content)
+          newEmbedding
         );
         if (similarity > 0.92) return true;
       }
@@ -2142,15 +2139,19 @@ const memoryRecallPlugin = {
     }
 
     if (autoRecall) {
-      api.registerHook("before_prompt_build", async (params: { sessionMessages?: string[]; userMessage?: string }, ctx) => {
-        const userMessage = params?.userMessage || "";
-        if (!userMessage || userMessage.length < 3) return { prependContext: "" };
+      api.registerHook("before_prompt_build", async (event, ctx) => {
+        const userMessage = event.prompt || "";
+        const sessionKey = ctx?.sessionKey ?? "default";
+        
+        api.logger.info(`[memory-recall] before_prompt_build called: session=${sessionKey}, prompt="${userMessage.slice(0, 50)}..."`);
 
-        const sessionKey = ctx?.sessionKey ?? userMessage.slice(0, 80);
+        if (!userMessage || userMessage.length < 3) return {};
+
         const cached = recallCache.get(sessionKey);
 
         if (!cached || Date.now() > cached.expire) {
-          return { prependContext: "" };
+          api.logger.info(`[memory-recall] before_prompt_build: cache miss for session=${sessionKey}`);
+          return {};
         }
 
         const maxChars = config.autoRecallMaxChars ?? 600;
@@ -2164,9 +2165,9 @@ const memoryRecallPlugin = {
           totalChars += (r.content as string).length + 30;
         }
 
-        if (!selected.length) return { prependContext: "" };
+        if (!selected.length) return {};
 
-        api.logger.info(`[memory-recall] cache hit: injecting ${selected.length} memories (${totalChars} chars)`);
+        api.logger.info(`[memory-recall] before_prompt_build: injecting ${selected.length} memories (${totalChars} chars)`);
 
         return {
           prependContext: `<relevant-memories>\n${selected.join("\n")}\n</relevant-memories>`,

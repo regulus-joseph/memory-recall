@@ -7,14 +7,20 @@ All notable changes to memory-recall are documented here.
 ### MemoryStore Fixes
 - **Field name fix**: LanceDB schema uses `memory_id` not `id` (id is reserved by LanceDB internally)
 - **makeArrowTable**: Store uses `makeArrowTable()` for proper Arrow typed data instead of plain objects
-- **Table creation**: Creates table with dummy row to infer schema, then uses makeArrowTable for all subsequent adds
+- **Table creation**: Creates table with dummy row (`Array(1024).fill(0)`) to infer schema, then uses makeArrowTable for all subsequent adds
 - **Search/delete/compact**: All use `memory_id` column, not `id`
 
 ### Model Update
 - **LLM model**: Changed from `qwen2.5:7b` to `qwen3.5:4b` (local standard)
 
+### Hook System
+- **message_received**: Works for all channels (feishu, telegram, dashboard, tui)
+- **before_prompt_build**: Fixed to use `event.prompt` instead of `params.userMessage`
+- **Cache mechanism**: Recall results cached in `recallCache` Map with TTL, injected via `before_prompt_build`
+
 ### New Tests
-- **TS smoke tests**: `tests/memory-store-smoke.test.mjs` - pure TypeScript MemoryStore unit tests
+- **TS smoke tests**: 25 unit tests passing
+- **Per-agent isolation**, **worker concurrency**, **BM25 negative score** tests
 
 ---
 
@@ -24,14 +30,13 @@ All notable changes to memory-recall are documented here.
 - **Removed**: Python worker, `pool_router.py`, `worker.py`, all `src/core/*.py`, `src/utils/*.py`
 - **New**: `MemoryStore` class — pure TypeScript implementation using:
   - `@lancedb/lancedb` for vector + scalar storage (per-agent LanceDB)
-  - `graphology` for L3 graph expansion (replaces NetworkX)
+  - `graphology` for L3 graph expansion
   - `nodejieba` for Chinese word segmentation
   - `bm25` package for L2 BM25 scoring
   - Direct `fetch` to Ollama API for embedding + LLM extraction
-- **Installation**: now requires `npm install` (nodejieba needs build tools: `apt install build-essential python3`)
+- **Installation**: now requires `npm install` (nodejieba needs build tools)
 - **No more** `~/.memory-recall-venv` Python venv
-- **No more** `USE_HTTP_POOL` env var (single-process per-session stores)
-- LanceDB FTS replaced by BM25 + WHERE clause LIKE queries
+- **No more** `USE_HTTP_POOL` env var
 
 ### Architecture
 - `sessionWorkers` Map stores `MemoryStore` instances per session
@@ -42,24 +47,20 @@ All notable changes to memory-recall are documented here.
 
 ## v0.6.0 (2026-05-16)
 
-### Architecture
-- **Per-session workers**: each session now gets a dedicated Worker process via `getWorker(sessionKey)`, replacing the single shared worker
-- Default worker (`_defaultWorker`) for decay/stats operations; session workers (`sessionWorkers` Map) for store/recall
-- Session workers are killed on `session_end`; all workers cleaned up on `gateway_stop`
+### Per-Session Workers
+- Each session gets a dedicated `MemoryStore` instance
+- Default worker for decay/stats; session workers for store/recall
+- Session workers killed on `session_end`; all workers cleaned up on `gateway_stop`
 
 ### New Tools
-- `memory_worker_status`: show all active session workers and health
+- `memory_worker_status`: show all active session workers
 - `memory_worker_restart`: kill and restart a specific session's worker
-
-### Bug Fixes
-- Fixed `memory_update`, `memory_stats`, `agent_end` store, and decay cycle to use correct worker references
-- Fixed `gateway_stop` to kill all session workers
 
 ---
 
 ## v0.5.0 (2026-05-10)
 
-- HTTP pool mode (`USE_HTTP_POOL=1`) with session affinity via `pool_router.py`
+- HTTP pool mode (`USE_HTTP_POOL=1`) with session affinity
 - Session buffer with `session_end` hook flush
 - 12 tools (expanded from 4)
 - Gateway-stop hook for clean worker shutdown

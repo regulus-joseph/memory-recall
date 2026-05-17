@@ -1,8 +1,8 @@
 {
   "name": "memory-recall",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "type": "module",
-  "description": "L1/L2/L3 memory recall plugin for OpenClaw with per-agent LanceDB storage, Weibull decay, and progressive compaction",
+  "description": "L1/L2/L3 cascade memory recall plugin for OpenClaw with per-agent LanceDB storage, Weibull decay, and progressive compaction. Pure TypeScript.",
   "main": "src/index.ts",
   "openclaw": {
     "extensions": [
@@ -13,7 +13,8 @@
     "test": "node --test tests/all.test.mjs && node --test tests/per-agent-isolation.test.mjs && node --test tests/worker-concurrency.test.mjs && node --test tests/bm25-negative-score.test.mjs && node --test tests/worker-smoke.test.mjs",
     "test:unit": "node --test tests/all.test.mjs",
     "test:worker": "node --test tests/worker-smoke.test.mjs && node --test tests/per-agent-isolation.test.mjs && node --test tests/worker-concurrency.test.mjs",
-    "test:smoke": "node smoke-test.mjs"
+    "test:smoke": "node smoke-test.mjs",
+    "build": "tsc src/index.ts --outDir dist --esModuleInterop --module commonjs --target es2022 --skipLibCheck"
   },
   "dependencies": {
     "@lancedb/lancedb": "^0.27.2",
@@ -28,13 +29,46 @@
   },
   "changelog": [
     {
-"version": "0.8.0",
+      "version": "0.8.0",
+      "date": "2026-05-17",
+      "changes": [
+        "LanceDB field name fix (memory_id instead of id)",
+        "makeArrowTable for proper Arrow typed data",
+        "Table creation with dummy row to infer schema",
+        "Changed LLM model from qwen2.5:7b to qwen3.5:4b",
+        "Fixed before_prompt_build to use event.prompt",
+        "message_received works for all channels (feishu, telegram, dashboard, tui)",
+        "Recall cache mechanism with TTL injection via before_prompt_build"
+      ]
+    },
+    {
+      "version": "0.7.0",
+      "date": "2026-05-17",
+      "changes": [
+        "Pure TypeScript implementation (no Python worker)",
+        "LanceDB for vector + scalar storage",
+        "graphology for L3 graph expansion",
+        "nodejieba for Chinese tokenization",
+        "bm25 package for L2 reranking",
+        "Direct fetch to Ollama API for embedding + LLM extraction"
+      ]
+    },
+    {
+      "version": "0.6.0",
+      "date": "2026-05-16",
+      "changes": [
+        "Per-session workers architecture",
+        "memory_worker_status tool",
+        "memory_worker_restart tool"
+      ]
+    },
+    {
+      "version": "0.5.0",
       "date": "2026-05-10",
       "changes": [
-        "HTTP pool mode (USE_HTTP_POOL=1) with session affinity",
-        "Session buffer with session_end hook flush",
-        "12 tools (expanded from 4)",
-        "Gateway-stop hook for clean worker shutdown"
+        "HTTP pool mode (USE_HTTP_POOL=1)",
+        "Session buffer with session_end flush",
+        "12 tools expanded from 4"
       ]
     },
     {
@@ -42,10 +76,9 @@
       "date": "2026-04-25",
       "changes": [
         "LanceDB migration",
-        "Worker architecture (stdio JSON-RPC)",
         "Weibull decay engine",
         "Compactor clustering",
-        "Tier protection (core memories)"
+        "Tier protection"
       ]
     },
     {
