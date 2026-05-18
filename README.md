@@ -16,7 +16,7 @@ memory-recall automatically stores conversation content and recalls relevant mem
 
 Memory lifecycle is managed with Weibull decay (recency/frequency/intrinsic importance) and progressive compaction clustering.
 
-**Key differentiator from memory-core**: memory-recall focuses on *recall* (retrieving past memories for current context), while memory-core focuses on *storage* (managing the memory database). Both can coexist.
+**Key differentiator from memory-core**: memory-recall focuses on *recall* (retrieving past memories for current context), while memory-core focuses on *storage* (managing the memory database). Both are complementary.
 
 ---
 
@@ -30,7 +30,8 @@ OpenClaw Gateway (TypeScript plugin)
     ├── registerService: decay timer (every 24h by default)
     └── MemoryStore (per-session, pure TypeScript)
         ├── L1: LanceDB vector search (1024-dim bge-m3)
-        ├── L2: BM25 rerank + nodejieba Chinese segmentation
+        ├── L2: BM25 rerank + nodejieba Chinese segmentation (BM25 boosts L1 vector results)
+        ├── Reranking: structured LLM reranking planned for future release
         ├── L3: graphology graph expansion
         ├── LLM extraction: Ollama qwen3.5:4b (6w + category + confidence)
         ├── Decay: Weibull composite score
@@ -38,7 +39,33 @@ OpenClaw Gateway (TypeScript plugin)
         └── Tier protection: core memories (importance ≥ 0.7) immune
 ```
 
+## Acknowledgements
+
+- **memory-lancedb-pro** — primary reference for the LanceDB storage architecture and Weibull decay strategy
+- Inspired by the broader per-agent memory research in the OpenClaw ecosystem
+
 ---
+
+## Agent Notes (Operational Observations)
+
+These are operational notes from ongoing agent use — not a feature checklist.
+
+**Retrieval behavior**
+- `mr_memory_recall` (semantic vector + BM25 cascade) tends to surface contextually related memories that don't share exact keywords. `mr_memory_search` (pure BM25 keyword) is more precise for exact symbol/parameter lookups; the two complement each other in practice.
+- BM25 rerank applies `bm25_score × 0.3` to boost L1 vector results, helping filter noisy vector matches on cross-topic queries.
+- L3 graph expansion (depth ≤ 2) grows the candidate pool beyond what L1/L2 return, useful for finding related memories in adjacent project contexts.
+
+**Reranking**
+- Current reranking uses BM25 keyword scoring against L1 vector results.
+- Structured LLM reranking is planned for a future release, which should further reduce false positives in the auto-inject path.
+
+**Access tracking**
+- Recall frequency is tracked per memory (`access_count`). Frequently recalled memories receive a frequency boost in the Weibull composite score, making them more resistant to decay over time.
+
+**Compatibility**
+- Works alongside memory-core without slot conflicts when loaded as a plugin (tools available as `mr_memory_*`). Auto-inject hook requires memory slot assignment.
+- Requires Ollama with `bge-m3:latest` for vector embeddings and `qwen3.5:4b` for LLM extraction.
+
 
 ## Installation
 
