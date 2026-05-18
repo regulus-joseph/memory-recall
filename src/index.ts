@@ -1522,18 +1522,13 @@ const memoryRecallPlugin = {
 
     if (autoStore) {
       console.log("[memory-recall] *** registering message_received hook via api.on ***");
-      api.on("message_received", async (event, ctx) => {
-        console.log("[memory-recall] *** message_received hook HANDLER CALLED ***");
-        console.log("[memory-recall] event.from:", event.from);
-        console.log("[memory-recall] event.content type:", typeof event.content);
-        console.log("[memory-recall] event.content:", JSON.stringify(event.content)?.slice(0, 200));
-        api.logger.info(`[memory-recall] message_received hook FIRED, text length: ${event.content?.length ?? 0}`);
-        const text = extractText(event.content);
-        if (!text || text.length < 10) return;
-        api.logger.info(`[memory-recall] storing message, length: ${text.length}`);
-
+api.on("message_received", async (event, ctx) => {
         const sessionKey = event.sessionKey ?? ctx?.sessionKey ?? event.from ?? "default";
         const agentId = event.from || (ctx?.sessionKey?.split(":")[1]) || "default";
+        console.log(`[memory-recall] message_received channel=${event.channelId} from=${event.from} sessionKey=${sessionKey} agentId=${agentId}`);
+        const text = extractText(event.content);
+        if (!text || text.length < 10) return;
+        api.logger.info(`[memory-recall] message_received: storing text.len=${text.length}, sessionKey=${sessionKey}`);
         const maxResults = config.autoRecallMaxItems ?? 3;
 
         const metadata = { role: "user", sender: event.from, channel_id: event.channelId, ctx_session_key: ctx?.sessionKey };
@@ -1567,15 +1562,18 @@ const memoryRecallPlugin = {
         }
       }, { name: "memory-recall-autostore" });
 
-      api.registerHook("agent_end", async (event) => {
+      api.on("agent_end", async (event, ctx) => {
         const sessionKey = event.sessionKey ?? "default";
+        const messages = event.messages as Array<{ role?: string; content?: unknown }>;
+        console.log(`[memory-recall] agent_end sessionKey=${sessionKey} ctx.sessionKey=${ctx?.sessionKey} messages=${messages?.length ?? 0}`);
         const messages = event.messages as Array<{ role?: string; content?: unknown }>;
         for (const msg of messages) {
           if (msg.role === "assistant") {
             const text = extractText(msg.content);
             if (text && text.length > 10) {
               const metadata = { role: "assistant" };
-              worker!.store({
+const sw = getWorker(sessionKey);
+              sw.store({
                 content: text,
                 conversation_id: event.sessionKey ?? event.conversationId,
                 metadata,
@@ -1593,12 +1591,11 @@ const memoryRecallPlugin = {
     }
 
     if (autoRecall) {
-      api.registerHook("before_prompt_build", async (event, ctx) => {
-        const userMessage = event.prompt || "";
+      api.on("before_prompt_build", async (event, ctx) => {
         const sessionKey = ctx?.sessionKey ?? "default";
+        const userMessage = event.prompt || "";
+        console.log(`[memory-recall] before_prompt_build sessionKey=${sessionKey} prompt.len=${userMessage.length}`);
         
-        api.logger.info(`[memory-recall] before_prompt_build called: session=${sessionKey}, prompt="${userMessage.slice(0, 50)}..."`);
-
         if (!userMessage || userMessage.length < 3) return {};
 
         const cached = recallCache.get(sessionKey);
@@ -1631,7 +1628,7 @@ const memoryRecallPlugin = {
 
     api.logger.info("[memory-recall] all hooks and tools registered");
 
-    api.registerHook("session_end", async (event) => {
+    api.on("session_end", async (event) => {
       const sessionKey = event.sessionKey ?? "default";
       recallCache.delete(sessionKey);
       const buffer = sessionBuffers.get(sessionKey);
@@ -1658,7 +1655,7 @@ const memoryRecallPlugin = {
       }
     }, { name: "memory-recall-session-end" });
 
-    api.registerHook("gateway_stop", async () => {
+    api.on("gateway_stop", async () => {
       // Kill default worker
       if (_defaultWorker) _defaultWorker.kill();
       // Kill all session workers
