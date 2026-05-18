@@ -84,7 +84,7 @@ xcode-select --install
 ```bash
 cd ~/projects/memory-recall
 npm install
-openclaw plugins install --link . --dangerously-force-unsafe-install
+openclaw plugins install --link .
 ```
 
 ### 3. Configure openclaw.json

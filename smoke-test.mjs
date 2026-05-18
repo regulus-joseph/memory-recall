@@ -91,7 +91,7 @@ async function testPlugin() {
 
   console.log("=== Smoke Test Complete ===");
   console.log("\nTo run with OpenClaw:");
-  console.log("  1. Link plugin: openclaw plugins install --link . --dangerously-force-unsafe-install");
+  console.log("  1. Link plugin: openclaw plugins install --link .");
   console.log("  2. Start gateway: openclaw gateway restart");
   console.log("  3. Check logs: openclaw logs 2>&1 | grep memory-recall");
 }

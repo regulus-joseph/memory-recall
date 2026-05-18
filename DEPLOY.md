@@ -44,10 +44,7 @@ ollama pull qwen2.5:7b
 ```bash
 cd ~/projects/memory-recall
 npm install
-openclaw plugins install --link . --dangerously-force-unsafe-install
-```
-
-> 注意：`--dangerously-force-unsafe-install` 仍需要，因为使用了 child_process.spawn。但已无 Python worker 依赖。
+openclaw plugins install --link .
 
 ---
 

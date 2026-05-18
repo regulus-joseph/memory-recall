@@ -321,10 +321,8 @@ xcode-select --install
 ```bash
 cd ~/projects/memory-recall
 npm install
-openclaw plugins install --link . --dangerously-force-unsafe-install
+openclaw plugins install --link .
 ```
-
-> 需要 `--dangerously-force-unsafe-install`，因为使用 `child_process.spawn`。
 
 ### 3. 配置 openclaw.json
 
@@ -463,7 +461,6 @@ print(db.open_table('memories').search('OpenClaw').limit(5).to_df())
 |------|------|------|
 | agent_id legacy bug | L2/L3 检索时 agent_id filter 有历史 bug | ⚠️ 已知 |
 | 首次衰减可能超时 | Worker 冷启动，后续正常 | ⚠️ 已知 |
-| `--dangerously-force-unsafe-install` 必需 | child_process.spawn 被标记 unsafe | ⚠️ 已知 |
 | LanceDB FTS 自动初始化 | 首次存储时创建 `create_fts_index("tokens")` | ✅ 已处理 |
 
 ---
