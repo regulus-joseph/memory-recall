@@ -500,7 +500,6 @@ npm run test:smoke
 |-------|-------------|--------|
 | `agent_id` legacy filter bug | L2/L3 may not filter correctly on agent_id in some cases | ⚠️ known |
 | First decay cycle may timeout | Worker cold start, subsequent cycles normal | ⚠️ known |
-| `--dangerously-force-unsafe-install` required | child_process.spawn still marked unsafe | ⚠️ known |
 | LanceDB FTS auto-initializes on first store | Creates `create_fts_index("tokens")` automatically | ✅ handled |
 
 ---
