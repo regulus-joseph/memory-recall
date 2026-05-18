@@ -44,6 +44,9 @@ tests/
 # Claude Code settings (local config, not for repo)
 .claude/
 
+# Archived legacy files
+.archive/
+
 # Development artifacts
 *.patch
 code.patch
