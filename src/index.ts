@@ -960,26 +960,32 @@ function getSessionWorker(sessionKey: string): MemoryStore {
 }
 
 function extractText(content: unknown): string | null {
-  if (typeof content === "string") return content.trim();
-  if (Array.isArray(content)) {
-    return content
-      .filter(
-        (b) =>
-          b &&
-          typeof b === "object" &&
-          "type" in b &&
-          (b as Record<string, unknown>).type === "text" &&
-          "text" in b
-      )
-      .map((b) => ((b as Record<string, unknown>).text as string) || "")
-      .filter(Boolean)
-      .join("\n")
-      .trim();
+  try {
+    if (typeof content === "string") return content.trim();
+    if (Array.isArray(content)) {
+      return content
+        .filter(
+          (b) =>
+            b &&
+            typeof b === "object" &&
+            "type" in b &&
+            (b as Record<string, unknown>).type === "text" &&
+            "text" in b
+        )
+        .map((b) => ((b as Record<string, unknown>).text as string) || "")
+        .filter(Boolean)
+        .join("\n")
+        .trim();
+    }
+    if (content && typeof content === "object" && "text" in content) {
+      return (content as Record<string, unknown>).text as string;
+    }
+    console.warn("[memory-recall] extractText: unrecognized content type", typeof content, JSON.stringify(content)?.slice(0, 100));
+    return null;
+  } catch (err) {
+    console.error("[memory-recall] extractText failed:", err, "content:", JSON.stringify(content)?.slice(0, 200));
+    return null;
   }
-  if (content && typeof content === "object" && "text" in content) {
-    return (content as Record<string, unknown>).text as string;
-  }
-  return null;
 }
 
 const memoryRecallPlugin = {
@@ -1523,10 +1529,12 @@ const memoryRecallPlugin = {
     if (autoStore) {
       console.log("[memory-recall] *** registering message_received hook via api.on ***");
 api.on("message_received", async (event, ctx) => {
+        console.log("[memory-recall] >>> message_received hook triggered", { channelId: event.channelId, from: event.from, contentType: typeof event.content, contentPreview: String(event.content).slice(0, 80) });
         const sessionKey = event.sessionKey ?? ctx?.sessionKey ?? event.from ?? "default";
         const agentId = ctx?.sessionKey?.split(":")[1] || "main";
         console.log(`[memory-recall] message_received channel=${event.channelId} from=${event.from} sessionKey=${sessionKey} agentId=${agentId}`);
         const text = extractText(event.content);
+        console.log("[memory-recall] message_received extractText:", { textLen: text?.length ?? null, textPreview: text?.slice(0, 80) });
         if (!text || text.length < 10) return;
         api.logger.info(`[memory-recall] message_received: storing text.len=${text.length}, sessionKey=${sessionKey}`);
         const maxResults = config.autoRecallMaxItems ?? 3;
