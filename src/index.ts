@@ -1524,7 +1524,7 @@ const memoryRecallPlugin = {
       console.log("[memory-recall] *** registering message_received hook via api.on ***");
 api.on("message_received", async (event, ctx) => {
         const sessionKey = event.sessionKey ?? ctx?.sessionKey ?? event.from ?? "default";
-        const agentId = event.from || (ctx?.sessionKey?.split(":")[1]) || "default";
+        const agentId = ctx?.sessionKey?.split(":")[1] || "main";
         console.log(`[memory-recall] message_received channel=${event.channelId} from=${event.from} sessionKey=${sessionKey} agentId=${agentId}`);
         const text = extractText(event.content);
         if (!text || text.length < 10) return;
