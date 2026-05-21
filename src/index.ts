@@ -820,16 +820,20 @@ class MemoryStore {
       const nodesToRemove: string[] = [];
       this.graph.forEachNode((node, attrs) => {
         if (attrs.scope === scope) {
-          try {
-            const memory = this.get({ memory_id: node, agent_id: scope });
-            if (!(memory as Record<string, unknown>).found) nodesToRemove.push(node);
-          } catch {
-            nodesToRemove.push(node);
-          }
+          nodesToRemove.push(node);
         }
       });
-      for (const n of nodesToRemove) {
-        try { this.graph.dropNode(n); danglingCleaned++; } catch {}
+      for (const node of nodesToRemove) {
+        try {
+          const memory = await this.get({ memory_id: node, agent_id: scope });
+          if (!(memory as Record<string, unknown>).found) {
+            this.graph.dropNode(node);
+            danglingCleaned++;
+          }
+        } catch {
+          this.graph.dropNode(node);
+          danglingCleaned++;
+        }
       }
       await this._saveGraph();
     }
@@ -839,12 +843,12 @@ class MemoryStore {
 
     if (this.graph) {
       for (const r of filtered) {
-if (!this.graph.hasNode(r.memory_id as string)) {
+        if (!this.graph.hasNode(r.memory_id as string)) {
           this.graph.addNode(r.memory_id as string, { scope, category: r.category as string });
 
-          const neighbors = await this._findRelated(r.memory_id as string, va, 3);
+          const neighbors = await this._findRelated(r.memory_id as string, (r.vector as Float32Array) || new Float32Array(EMBEDDING_DIM), 3);
 
-          try { this.graph.addEdge(r.memory_id as string, n); } catch {}
+          for (const neighbor of neighbors) { try { this.graph.addEdge(r.memory_id as string, neighbor); } catch {} }
         }
       }
       await this._saveGraph();

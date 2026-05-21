@@ -11,7 +11,7 @@
 memory-recall automatically stores conversation content and recalls relevant memories at the start of each agent turn. It uses a cascade retrieval architecture:
 
 - **L1**: LanceDB vector search (1024-dim bge-m3 embeddings)
-- **L2**: BM25 rerank + nodejieba Chinese tokenization  
+- **L2**: BM25 rerank + nodejieba Chinese tokenization
 - **L3**: graphology graph expansion for related memory discovery
 
 Memory lifecycle is managed with Weibull decay (recency/frequency/intrinsic importance) and progressive compaction clustering.
@@ -445,16 +445,16 @@ returns: {new_pid, status}
 ```bash
 cd ~/projects/memory-recall
 
-# 初始化
+# Initial
 python src/cli.py init
 
-# 存储
+# Store
 python src/cli.py store --content "Marlon 的配置" --agent-id main
 
-# 召回
+# Recall
 python src/cli.py recall --query "Marlon" --max 5
 
-# 搜索
+# Search
 python src/cli.py search --query "futu" --max 5
 
 # 查看数据
