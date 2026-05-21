@@ -9,7 +9,6 @@
  * Store (agent_end) is awaited since storage must complete before session ends.
  */
 import { createRequire } from "node:module";
-import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
 import { Type } from "@sinclair/typebox";
 import type { Connection, Table } from "@lancedb/lancedb";
 import { makeArrowTable } from "@lancedb/lancedb";
@@ -18,6 +17,7 @@ import nodejieba from "nodejieba";
 import { homedir } from "node:os";
 import { existsSync, mkdirSync, readFileSync, writeFileSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
+import type { OpenClawPluginApi } from "./types/openclaw-plugin-sdk.js";
 
 interface MemoryRecallConfig {
   autoStore?: boolean;

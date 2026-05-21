@@ -444,22 +444,39 @@ returns: {new_pid, status}
 
 ### 独立 CLI（独立进程调用）
 
-安装插件后全局可用 `mr` 命令：
-
 ```bash
-# 编译（如需要）
+# 编译
 npm run build
 
-# 全局使用 mr 命令（插件 link 后可用）
-mr init --agent-id main
-mr store --agent-id main --content "用户的 futu OpenD 在 ~/FutuOpenD"
-mr recall --agent-id main --query "futu OpenD" --max 5
-mr search --agent-id main --query "futu OpenD"
-mr list --agent-id main
-mr stats --agent-id main
-mr get --agent-id main --memory-id <id>
-mr forget --agent-id main --memory-id <id>
-mr reset --agent-id main --force
+# 执行 CLI
+node dist/cli.js <command> [options]
+
+# 初始化
+node dist/cli.js init --agent-id main
+
+# 存储记忆
+node dist/cli.js store --agent-id main --content "用户的 futu OpenD 在 ~/FutuOpenD"
+
+# 召回（L1/L2/L3 级联）
+node dist/cli.js recall --agent-id main --query "futu OpenD" --max 5
+
+# 搜索（BM25 关键词）
+node dist/cli.js search --agent-id main --query "futu OpenD"
+
+# 列出所有记忆
+node dist/cli.js list --agent-id main
+
+# 统计面板
+node dist/cli.js stats --agent-id main
+
+# 按 ID 获取单条
+node dist/cli.js get --agent-id main --memory-id <id>
+
+# 删除记忆
+node dist/cli.js forget --agent-id main --memory-id <id>
+
+# 清空所有记忆（需 --force）
+node dist/cli.js reset --agent-id main --force
 
 # 直接查 LanceDB
 ~/.local/bin/python -c "
