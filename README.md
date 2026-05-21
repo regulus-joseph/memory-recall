@@ -442,27 +442,93 @@ returns: {new_pid, status}
 
 ## CLI
 
+### 独立 CLI（独立进程调用）
+
 ```bash
 cd ~/projects/memory-recall
 
-# Initial
-python src/cli.py init
+# 查看帮助
+npx tsx src/cli.ts
 
-# Store
-python src/cli.py store --content "Marlon 的配置" --agent-id main
+# 初始化
+npx tsx src/cli.ts init --agent-id main
 
-# Recall
-python src/cli.py recall --query "Marlon" --max 5
+# 存储记忆
+npx tsx src/cli.ts store --agent-id main --content "用户的 futu OpenD 在 ~/FutuOpenD"
 
-# Search
-python src/cli.py search --query "futu" --max 5
+# 召回（L1/L2/L3 级联）
+npx tsx src/cli.ts recall --agent-id main --query "futu OpenD" --max 5
 
-# 查看数据
+# 搜索（BM25 关键词）
+npx tsx src/cli.ts search --agent-id main --query "futu OpenD"
+
+# 列出所有记忆
+npx tsx src/cli.ts list --agent-id main
+
+# 统计面板
+npx tsx src/cli.ts stats --agent-id main
+
+# 按 ID 获取单条
+npx tsx src/cli.ts get --agent-id main --memory-id <id>
+
+# 删除记忆
+npx tsx src/cli.ts forget --agent-id main --memory-id <id>
+
+# 清空所有记忆（需 --force）
+npx tsx src/cli.ts reset --agent-id main --force
+
+# 直接查 LanceDB
 ~/.local/bin/python -c "
 import lancedb
 db = lancedb.connect('~/.memory-recall/data/main')
 print(db.open_table('memories').search('OpenClaw').limit(5).to_df())
 "
+```
+
+### ACP 工具（agent 运行时调用）
+
+所有命令通过 `mr_memory_*` / `memory_*` 系列 plugin tool 调用：
+
+```javascript
+// Store（存储记忆）
+mr_memory_store({ content: "Marlon 的配置", agent_id: "main" })
+
+// Recall（L1/L2/L3 级联召回）
+mr_memory_recall({ query: "Marlon", max_results: 5 })
+
+// Search（纯 BM25 关键词搜索）
+mr_memory_search({ query: "futu", max_results: 5 })
+
+// Get（按 ID 获取单条记忆）
+mr_memory_get({ memory_id: "abc-123" })
+
+// Browse（按时间/conversation 浏览）
+memory_browse({ since: "2026-05-01", until: "2026-05-22", limit: 20 })
+
+// List（分页列表 + 过滤）
+memory_list({ agent_id: "main", category: "fact", limit: 20 })
+
+// Extract（预览 LLM 提取结果）
+memory_extract({ content: "用户的临时调试命令" })
+
+// Update（更新内容或 metadata）
+memory_update({ memory_id: "abc-123", metadata: { importance: 0.85 } })
+
+// Forget（删除记忆，Tier 1 保护）
+memory_forget({ memory_id: "abc-123" })
+
+// Reset（清空所有记忆，需 force:true）
+memory_reset({ scope: "main", force: true })
+
+// Stats（统计面板）
+memory_stats()
+
+// Worker status（session worker 健康检查）
+memory_worker_status()
+
+// Worker restart（重启 worker）
+memory_worker_restart({ session_id: "agent:main:main" })
+```
 ```
 
 ---
