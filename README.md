@@ -444,38 +444,49 @@ returns: {new_pid, status}
 
 ### 独立 CLI（独立进程调用）
 
+编译后可直接在项目外运行：
+
 ```bash
 cd ~/projects/memory-recall
 
+# 编译（如需重新编译）
+npx tsc src/cli.ts --outDir dist --esModuleInterop --module es2022 --target es2022 --skipLibCheck --noEmitOnError false
+
+# 生产环境（推荐）
+node dist/cli.js <command> [options]
+
+# 开发环境（直接跑源码）
+npx tsx src/cli.ts <command> [options]
+
 # 查看帮助
-npx tsx src/cli.ts
+node dist/cli.js
 
 # 初始化
-npx tsx src/cli.ts init --agent-id main
+node dist/cli.js init --agent-id main
 
 # 存储记忆
-npx tsx src/cli.ts store --agent-id main --content "用户的 futu OpenD 在 ~/FutuOpenD"
+node dist/cli.js store --agent-id main --content "用户的 futu OpenD 在 ~/FutuOpenD"
 
 # 召回（L1/L2/L3 级联）
-npx tsx src/cli.ts recall --agent-id main --query "futu OpenD" --max 5
+node dist/cli.js recall --agent-id main --query "futu OpenD" --max 5
 
 # 搜索（BM25 关键词）
-npx tsx src/cli.ts search --agent-id main --query "futu OpenD"
+node dist/cli.js search --agent-id main --query "futu OpenD"
 
 # 列出所有记忆
-npx tsx src/cli.ts list --agent-id main
+node dist/cli.js list --agent-id main
 
 # 统计面板
-npx tsx src/cli.ts stats --agent-id main
+node dist/cli.js stats --agent-id main
 
 # 按 ID 获取单条
-npx tsx src/cli.ts get --agent-id main --memory-id <id>
+node dist/cli.js get --agent-id main --memory-id <id>
 
 # 删除记忆
-npx tsx src/cli.ts forget --agent-id main --memory-id <id>
+node dist/cli.js forget --agent-id main --memory-id <id>
 
 # 清空所有记忆（需 --force）
-npx tsx src/cli.ts reset --agent-id main --force
+node dist/cli.js reset --agent-id main --force
 
 # 直接查 LanceDB
 ~/.local/bin/python -c "
