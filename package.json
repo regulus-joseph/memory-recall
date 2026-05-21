@@ -4,9 +4,6 @@
   "type": "module",
   "description": "L1/L2/L3 cascade memory recall plugin for OpenClaw with per-agent LanceDB storage, Weibull decay, and progressive compaction. Pure TypeScript.",
   "main": "src/index.ts",
-  "bin": {
-    "mr": "dist/cli.js"
-  },
   "openclaw": {
     "extensions": [
       "./src/index.ts"
