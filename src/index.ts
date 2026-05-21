@@ -1532,7 +1532,7 @@ api.on("message_received", async (event, ctx) => {
         console.log("[memory-recall] >>> message_received hook triggered", { channelId: event.channelId, from: event.from, contentType: typeof event.content, contentPreview: String(event.content).slice(0, 80) });
         const sessionKey = event.sessionKey ?? ctx?.sessionKey ?? event.from ?? "default";
         const agentId = ctx?.sessionKey?.split(":")[1] || "main";
-        console.log(`[memory-recall] message_received channel=${event.channelId} from=${event.from} sessionKey=${sessionKey} agentId=${agentId}`);
+        console.log(`[memory-recall] message_received channel=${event.channelId} from=${event.from} sessionKey=${sessionKey} agentId=${agentId} (ctx.sessionKey=${ctx?.sessionKey})`);
         const text = extractText(event.content);
         console.log("[memory-recall] message_received extractText:", { textLen: text?.length ?? null, textPreview: text?.slice(0, 80) });
         if (!text || text.length < 10) return;
