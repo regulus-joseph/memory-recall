@@ -1574,7 +1574,6 @@ api.on("message_received", async (event, ctx) => {
         const sessionKey = event.sessionKey ?? "default";
         const messages = event.messages as Array<{ role?: string; content?: unknown }>;
         console.log(`[memory-recall] agent_end sessionKey=${sessionKey} ctx.sessionKey=${ctx?.sessionKey} messages=${messages?.length ?? 0}`);
-        const messages = event.messages as Array<{ role?: string; content?: unknown }>;
         for (const msg of messages) {
           if (msg.role === "assistant") {
             const text = extractText(msg.content);
