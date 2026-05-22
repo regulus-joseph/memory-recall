@@ -79,11 +79,12 @@ apt install build-essential python3
 xcode-select --install
 ```
 
-### 2. Link plugin
+### 2. Build and link plugin
 
 ```bash
 cd ~/projects/memory-recall
 npm install
+npm run build
 openclaw plugins install --link .
 ```
 

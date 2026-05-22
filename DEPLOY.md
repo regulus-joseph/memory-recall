@@ -2,7 +2,7 @@
 
 > 适用环境：Win11 + WSL2 (Ubuntu)
 > 目标用户：个人开发者
-> 当前版本：v0.7.0 (纯 TypeScript MemoryStore, 无 Python worker)
+> 当前版本：v0.8.0 (纯 TypeScript，无 Python worker)
 
 ---
 
@@ -12,9 +12,9 @@
 - **Node.js** (openclaw gateway)
 - **Ollama**（WSL2 内运行）
   - `bge-m3`（embedding）
-  - `qwen2.5:7b`（LLM extraction）
+  - `qwen3.5:4b`（LLM extraction）
 
-**无外部依赖**：无 Python worker、无 Qdrant、无 LanceDB server，数据存在本地 LanceDB 文件。
+**纯 TypeScript**：无 Python worker、无外部向量数据库，数据存在本地 LanceDB 文件。
 
 ---
 
@@ -34,7 +34,7 @@ xcode-select --install
 
 ```bash
 ollama pull bge-m3
-ollama pull qwen2.5:7b
+ollama pull qwen3.5:4b
 ```
 
 ---
@@ -44,7 +44,9 @@ ollama pull qwen2.5:7b
 ```bash
 cd ~/projects/memory-recall
 npm install
+npm run build
 openclaw plugins install --link .
+```
 
 ---
 
@@ -55,7 +57,9 @@ openclaw plugins install --link .
 ```json
 {
   "plugins": {
-    "allow": ["memory-recall", "minimax", "browser", "acpx"],
+    "allow": ["memory-recall", "minimax", "browser", "skill-auto-injection", "policy-layer"],
+    "bundledDiscovery": "allowlist",
+    "slots": { "memory": "memory-core" },
     "entries": {
       "memory-recall": {
         "enabled": true,
@@ -80,17 +84,59 @@ openclaw gateway restart
 
 ---
 
+## CLI 使用
+
+### 编译
+
+```bash
+npm run build
+```
+
+### 命令
+
+```bash
+# 初始化
+node dist/cli.js init --agent-id main
+
+# 存储记忆
+node dist/cli.js store --agent-id main --content "用户的 futu OpenD 在 ~/FutuOpenD"
+
+# 召回（L1/L2/L3 级联）
+node dist/cli.js recall --agent-id main --query "futu OpenD" --max 5
+
+# 搜索（BM25 关键词）
+node dist/cli.js search --agent-id main --query "futu OpenD"
+
+# 浏览
+node dist/cli.js browse --agent-id main --max 10
+
+# 按 ID 获取单条
+node dist/cli.js get --agent-id main --memory-id <id>
+
+# 列出所有记忆
+node dist/cli.js list --agent-id main
+
+# 统计面板
+node dist/cli.js stats --agent-id main
+
+# 删除记忆
+node dist/cli.js forget --agent-id main --memory-id <id>
+
+# 清空所有记忆（需 --force）
+node dist/cli.js reset --agent-id main --force
+```
+
+---
+
 ## 运维
 
 ### 启停
 
-Worker 由 TS plugin 通过 `child_process.spawn` 管理生命周期，无需单独启停。
-
 ```bash
-# 重启 gateway（即重启 worker）
+# 重启 gateway
 openclaw gateway restart
 
-# 查看 worker 日志
+# 查看插件日志
 openclaw logs 2>&1 | grep memory-recall
 ```
 
@@ -100,47 +146,12 @@ openclaw logs 2>&1 | grep memory-recall
 openclaw logs 2>&1 | grep "decay\|compactor"
 ```
 
-首次 decay cycle 可能超时（worker 冷启动），后续正常运行。
-
 ### 数据目录
 
 ```
-~/.memory-recall/data/
-└── {agent_id}/
-    ├── memories.lance/    # LanceDB 表（per-agent）
-    └── graph.json         # NetworkX 图（per-agent）
-```
-
----
-
-## 快速测试
-
-```bash
-# 查看插件加载
-openclaw logs 2>&1 | grep "memory-recall"
-
-# 手动测试 worker 健康
-~/.memory-recall-venv/bin/python -c "
-import sys; sys.path.insert(0, '/home/marlon-wei/projects/memory-recall/src')
-import asyncio, worker
-print(asyncio.run(worker.cmd_health()))
-"
-
-# 查看 LanceDB 表
-~/.memory-recall-venv/bin/python -c "
-import lancedb
-db = lancedb.connect('/home/marlon-wei/.memory-recall/data/main')
-tbl = db.open_table('memories')
-print(f'Rows: {tbl.count_rows()}')
-"
-
-# 查看 NetworkX 图
-~/.memory-recall-venv/bin/python -c "
-import json, networkx as nx
-with open('/home/marlon-wei/.memory-recall/data/main/graph.json') as f:
-    g = nx.node_link_graph(json.load(f))
-print(f'Nodes: {g.number_of_nodes()}, Edges: {g.number_of_edges()}')
-"
+~/.memory-recall/data/{agent_id}/
+├── lancedb/              # LanceDB 表（vector + scalar）
+└── graph.json            # graphology 图（per-agent）
 ```
 
 ---
@@ -156,6 +167,7 @@ openclaw logs 2>&1 | grep memory-recall | tail -20
 # 2. 检查 npm 依赖
 cd ~/projects/memory-recall
 npm install
+npm run build
 
 # 3. 检查 nodejieba 编译
 node -e "require('nodejieba')" 2>&1
@@ -172,31 +184,21 @@ curl -s -X POST http://localhost:11434/api/embeddings \
   -d '{"model":"bge-m3","prompt":"hello"}'
 ```
 
-### decay cycle 超时
-
-首次运行可能超时（worker 冷启动初始化慢）。这是预期行为，后续运行正常。
-
-```bash
-# 手动触发一次看详细日志
-openclaw gateway restart
-sleep 5 && openclaw logs 2>&1 | grep "decay\|compact"
-```
-
 ---
 
 ## 环境变量
 
 | 变量 | 说明 | 默认值 |
-|------|------|-------|
-| `PYTHON_BIN` | Worker Python 路径 | `~/.memory-recall-venv/bin/python` |
+|------|------|--------|
 | `EMBEDDING_URL` | Ollama embedding API | `http://localhost:11434/api/embeddings` |
 | `EMBEDDING_MODEL` | Embedding 模型 | `bge-m3` |
 | `OLLAMA_URL` | Ollama generate API | `http://localhost:11434` |
-| `LLM_MODEL` | Extraction LLM | `qwen2.5:7b` |
+| `LLM_MODEL` | Extraction LLM | `qwen3.5:4b` |
+| `DATA_DIR` | 数据根目录 | `~/.memory-recall/data` |
 
 覆盖示例：
 ```bash
 # 在 openclaw 启动前设置
-export PYTHON_BIN=/custom/path/bin/python
+export LLM_MODEL=qwen2.5:7b
 openclaw gateway restart
 ```
