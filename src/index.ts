@@ -448,7 +448,7 @@ class MemoryStore {
       const results = await this.table!.search(content, "tokens").limit(5).toArray();
       for (const r of results as Record<string, unknown>[]) {
         const similarity = cosineSimilarity(
-          (r.vector as Float32Array) || new Float32Array(EMBEDDING_DIM),
+          ((r.vector as unknown as { toArray(): Float32Array }).toArray?.() || (r.vector as Float32Array)),
           newEmbedding
         );
         if (similarity > 0.92) return true;
@@ -462,7 +462,10 @@ class MemoryStore {
     try {
       const all = await this.table.query().limit(1000).toArray();
       const scored = all
-        .map(r => ({ memory_id: r.memory_id as string, sim: cosineSimilarity(embedding, (r.vector as Float32Array) || new Float32Array(EMBEDDING_DIM)) }))
+        .map(r => {
+          const vec = ((r.vector as unknown as { toArray(): Float32Array }).toArray?.() || (r.vector as Float32Array));
+          return { memory_id: r.memory_id as string, sim: cosineSimilarity(embedding, vec) };
+        })
         .filter(x => x.memory_id !== memoryId && x.sim > 0.7)
         .sort((a, b) => b.sim - a.sim)
         .slice(0, limit);
@@ -510,10 +513,14 @@ class MemoryStore {
       const all = await this.table.query().limit(500).toArray();
       const scored = all
         .filter(r => (r.scope as string) === scope)
-        .map(r => ({
-          ...r,
-          relevance_score: cosineSimilarity(embedding, (r.vector as Float32Array) || new Float32Array(EMBEDDING_DIM)),
-        }))
+        .map(r => {
+          // LanceDB returns Vector objects, not Float32Array - convert properly
+          const vec = (r.vector as unknown as { toArray(): Float32Array }).toArray?.() || (r.vector as Float32Array);
+          return {
+            ...r,
+            relevance_score: cosineSimilarity(embedding, vec),
+          };
+        })
         .sort((a, b) => (b.relevance_score as number) - (a.relevance_score as number))
         .slice(0, limit);
       return scored;
@@ -846,7 +853,7 @@ class MemoryStore {
         if (!this.graph.hasNode(r.memory_id as string)) {
           this.graph.addNode(r.memory_id as string, { scope, category: r.category as string });
 
-          const neighbors = await this._findRelated(r.memory_id as string, (r.vector as Float32Array) || new Float32Array(EMBEDDING_DIM), 3);
+          const neighbors = await this._findRelated(r.memory_id as string, ((r.vector as unknown as { toArray(): Float32Array }).toArray?.() || (r.vector as Float32Array)), 3);
 
           for (const neighbor of neighbors) { try { this.graph.addEdge(r.memory_id as string, neighbor); } catch {} }
         }
