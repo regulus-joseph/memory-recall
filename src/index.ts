@@ -585,14 +585,18 @@ class MemoryStore {
   async get(params: { memory_id: string; agent_id?: string }): Promise<Record<string, unknown>> {
     await this._ensureInit();
     try {
-      const results = await this.table!.search(params.memory_id, "memory_id").limit(1).toArray();
+      const results = await this.table!.query().filter(`memory_id = "${params.memory_id}"`).limit(1).toArray();
       if (!results.length) return { found: false };
       const r = results[0] as Record<string, unknown>;
-      await this.table!.update([{
-        ...r,
-        access_count: (r.access_count as number || 0) + 1,
-        last_accessed_at: Date.now(),
-      }]);
+      try {
+        await this.table!.update([{
+          memory_id: r.memory_id as string,
+          access_count: (r.access_count as number || 0) + 1,
+          last_accessed_at: Date.now(),
+        }]);
+      } catch {
+        // update on read is best-effort, ignore failure
+      }
       return { ...r, found: true };
     } catch {
       return { found: false };
@@ -672,7 +676,7 @@ class MemoryStore {
       const scores = scoreBM25(params.query, texts);
       const results = filtered
         .map((r, i) => ({ ...r, score: scores[i] || 0 }))
-        .filter(r => r.score > 0)
+        .filter(r => !Number.isNaN(r.score))
         .sort((a, b) => (b.score as number) - (a.score as number))
         .slice(params.offset ?? 0, limit);
       return { results, count: results.length };
