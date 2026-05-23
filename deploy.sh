@@ -1,66 +1,55 @@
 #!/bin/bash
 set -e
-echo "=== memory-recall 部署脚本 ==="
+echo "=== memory-recall deployment script ==="
 
-# 1. 创建 Python venv
-echo "[1/3] 创建 Python venv..."
-if [ ! -d "$HOME/.memory-recall-venv" ]; then
-    python3 -m venv "$HOME/.memory-recall-venv"
+# 1. Check Node.js
+echo "[1/3] Checking Node.js..."
+if ! command -v node &> /dev/null; then
+    echo "  ERROR: Node.js not found. Install from https://nodejs.org/"
+    exit 1
 fi
-VENV_PY="$HOME/.memory-recall-venv/bin/python"
-echo "  venv python: $VENV_PY"
+echo "  Node.js: $(node --version)"
+echo "  npm: $(npm --version)"
 
-# 2. 安装 Python 依赖
-echo "[2/3] 安装 Python 依赖..."
-$VENV_PY -m pip install -q lancedb pyarrow jieba networkx httpx
-echo "  Python 依赖安装完成"
+# 2. Install npm dependencies
+echo "[2/3] Installing npm dependencies..."
+cd ~/projects/memory-recall
+npm install
+echo "  npm dependencies installed"
 
-# 3. 词表维护 systemd timer（每天凌晨3点运行）
-echo "[3/3] 配置词表维护 timer..."
-mkdir -p ~/.config/systemd/user
-PROJ=$HOME/projects/memory-recall
-
-cat > ~/.config/systemd/user/memory-recall-dict.timer << 'EOF'
-[Unit]
-Description=Memory Recall Dictionary Maintenance Timer
-
-[Timer]
-OnCalendar=*-*-* 03:00:00
-Persistent=true
-
-[Install]
-WantedBy=timers.target
-EOF
-
-cat > ~/.config/systemd/user/memory-recall-dict.service << 'EOF'
-[Unit]
-Description=Memory Recall Dictionary Maintenance
-After=network.target
-
-[Service]
-Type=oneshot
-ExecStart=$HOME/.memory-recall-venv/bin/python $HOME/projects/memory-recall/src/dict_maintenance.py
-StandardOutput=append:/tmp/memory-recall-dict.log
-StandardError=append:/tmp/memory-recall-dict.log
-EOF
-
-echo "  Timer 已写入: ~/.config/systemd/user/memory-recall-dict.timer"
-
-# 启用 timer
-systemctl --user daemon-reload
-systemctl --user enable memory-recall-dict.timer
-systemctl --user start memory-recall-dict.timer
+# 3. Build TypeScript
+echo "[3/3] Building TypeScript..."
+npm run build
+echo "  Build complete (dist/ ready)"
 
 echo ""
-echo "=== 部署完成 ==="
-echo "  TS plugin 通过 child_process.spawn 管理 worker.py 生命周期"
-echo "  无需 systemd service（插件自主管理）"
+echo "=== Deployment complete ==="
 echo ""
-echo "=== 词表维护 ==="
-echo "  Timer: memory-recall-dict.timer (每天03:00自动运行)"
-echo "  手动运行: ~/.memory-recall-venv/bin/python $PROJ/src/dict_maintenance.py --dry-run"
-echo "  日志: tail -f /tmp/memory-recall-dict.log"
+echo "=== Next steps ==="
 echo ""
-echo "=== 手动测试 worker.py ==="
-echo "  cd $PROJ && bash start.sh"
-echo "  echo '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"health\",\"params\":{}}' | python3 src/worker.py"
+echo "1. Link plugin (optional - for mr global command):"
+echo "   cd ~/projects/memory-recall && npm link"
+echo ""
+echo "2. Install OpenClaw plugin:"
+echo "   openclaw plugins install --link ~/projects/memory-recall"
+echo ""
+echo "3. Configure openclaw.json (see DEPLOY.md)"
+echo ""
+echo "4. Restart gateway:"
+echo "   openclaw gateway restart"
+echo ""
+echo "=== CLI usage ==="
+echo ""
+echo "Option A: Global mr command (after npm link)"
+echo "   mr init --agent-id main"
+echo "   mr store --agent-id main --content 'Marlon config'"
+echo "   mr recall --agent-id main --query 'Marlon'"
+echo "   mr list --agent-id main"
+echo ""
+echo "Option B: Direct node call (no setup)"
+echo "   node ~/projects/memory-recall/dist/cli.js init --agent-id main"
+echo "   node ~/projects/memory-recall/dist/cli.js store --agent-id main --content 'Marlon config'"
+echo ""
+echo "=== Manual test ==="
+echo "   mr stats --agent-id main"
+echo "   openclaw plugins inspect memory-recall"
