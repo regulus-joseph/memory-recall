@@ -443,92 +443,126 @@ returns: {new_pid, status}
 
 ## CLI
 
-### 独立 CLI（独立进程调用）
+### Global `mr` command (recommended)
+
+After `npm link`, use from any directory:
 
 ```bash
-# 编译
-npm run build
+# Initialize
+mr init --agent-id main
 
-# 执行 CLI
-node dist/cli.js <command> [options]
+# Store a memory
+mr store --agent-id main --content "Marlon's futu OpenD at ~/FutuOpenD"
 
-# 初始化
-node dist/cli.js init --agent-id main
+# Recall (L1/L2/L3 cascade)
+mr recall --agent-id main --query "futu OpenD" --max 5
 
-# 存储记忆
-node dist/cli.js store --agent-id main --content "用户的 futu OpenD 在 ~/FutuOpenD"
+# Search (BM25 keyword)
+mr search --agent-id main --query "futu OpenD"
 
-# 召回（L1/L2/L3 级联）
-node dist/cli.js recall --agent-id main --query "futu OpenD" --max 5
+# List all memories
+mr list --agent-id main
 
-# 搜索（BM25 关键词）
-node dist/cli.js search --agent-id main --query "futu OpenD"
+# Statistics
+mr stats --agent-id main
 
-# 列出所有记忆
-node dist/cli.js list --agent-id main
+# Get by ID
+mr get --agent-id main --memory-id <id>
 
-# 统计面板
-node dist/cli.js stats --agent-id main
+# Browse
+mr browse --agent-id main --max 10
 
-# 按 ID 获取单条
-node dist/cli.js get --agent-id main --memory-id <id>
+# Delete a memory
+mr forget --agent-id main --memory-id <id>
 
-# 删除记忆
-node dist/cli.js forget --agent-id main --memory-id <id>
-
-# 清空所有记忆（需 --force）
-node dist/cli.js reset --agent-id main --force
-
-# 直接查 LanceDB
-~/.local/bin/python -c "
-import lancedb
-db = lancedb.connect('~/.memory-recall/data/main')
-print(db.open_table('memories').search('OpenClaw').limit(5).to_df())
-"
+# Reset all (requires --force)
+mr reset --agent-id main --force
 ```
 
-### ACP 工具（agent 运行时调用）
+### Standalone CLI (node call)
 
-所有命令通过 `mr_memory_*` / `memory_*` 系列 plugin tool 调用：
+Without `npm link`, use the full path:
+
+```bash
+# Build
+npm run build
+
+# Run CLI
+node dist/cli.js <command> [options]
+
+# Initialize
+node dist/cli.js init --agent-id main
+
+# Store a memory
+node dist/cli.js store --agent-id main --content "Marlon's futu OpenD at ~/FutuOpenD"
+
+# Recall (L1/L2/L3 cascade)
+node dist/cli.js recall --agent-id main --query "futu OpenD" --max 5
+
+# Search (BM25 keyword)
+node dist/cli.js search --agent-id main --query "futu OpenD"
+
+# List all memories
+node dist/cli.js list --agent-id main
+
+# Statistics
+node dist/cli.js stats --agent-id main
+
+# Get by ID
+node dist/cli.js get --agent-id main --memory-id <id>
+
+# Browse
+node dist/cli.js browse --agent-id main --max 10
+
+# Delete a memory
+node dist/cli.js forget --agent-id main --memory-id <id>
+
+# Reset all (requires --force)
+node dist/cli.js reset --agent-id main --force
+```
+
+### ACP Tools (runtime)
+
+All commands available via `mr_memory_*` / `memory_*` plugin tools:
 
 ```javascript
-// Store（存储记忆）
-mr_memory_store({ content: "Marlon 的配置", agent_id: "main" })
+// Store a memory
+mr_memory_store({ content: "Marlon configuration", agent_id: "main" })
 
-// Recall（L1/L2/L3 级联召回）
+// Recall (L1/L2/L3 cascade)
 mr_memory_recall({ query: "Marlon", max_results: 5 })
 
-// Search（纯 BM25 关键词搜索）
+// Search (BM25 keyword)
 mr_memory_search({ query: "futu", max_results: 5 })
 
-// Get（按 ID 获取单条记忆）
+// Get by ID
 mr_memory_get({ memory_id: "abc-123" })
 
-// Browse（按时间/conversation 浏览）
+// Browse by time/conversation
 memory_browse({ since: "2026-05-01", until: "2026-05-22", limit: 20 })
 
-// List（分页列表 + 过滤）
+// List with filters
 memory_list({ agent_id: "main", category: "fact", limit: 20 })
 
-// Extract（预览 LLM 提取结果）
-memory_extract({ content: "用户的临时调试命令" })
+// Preview LLM extraction
+memory_extract({ content: "User's temporary debug command" })
 
-// Update（更新内容或 metadata）
+// Update content or metadata
 memory_update({ memory_id: "abc-123", metadata: { importance: 0.85 } })
 
-// Forget（删除记忆，Tier 1 保护）
+// Delete (Tier 1 protected)
 memory_forget({ memory_id: "abc-123" })
 
-// Reset（清空所有记忆，需 force:true）
+// Reset all (requires force:true)
 memory_reset({ scope: "main", force: true })
 
-// Stats（统计面板）
+// Statistics
 memory_stats()
 
-// Worker status（session worker 健康检查）
+// Worker health check
 memory_worker_status()
 
-// Worker restart（重启 worker）
+// Restart worker
 memory_worker_restart({ session_id: "agent:main:main" })
 ```
 ```
