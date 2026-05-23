@@ -425,7 +425,7 @@ class MemoryStore {
       original_source_count: 1,
     };
 
-    await this.table!.add(makeArrowTable([record], { vector: { dimension: EMBEDDING_DIM } }));
+    await this.table!.add(makeArrowTable([record], { dictionaryEncodeStrings: false }));
     this.vectorIndex.set(memory_id, embedding);
 
     if (this.graph) {
@@ -589,11 +589,13 @@ class MemoryStore {
       if (!results.length) return { found: false };
       const r = results[0] as Record<string, unknown>;
       try {
-        await this.table!.update([{
-          memory_id: r.memory_id as string,
-          access_count: (r.access_count as number || 0) + 1,
-          last_accessed_at: Date.now(),
-        }]);
+        await this.table!.update({
+          values: {
+            memory_id: r.memory_id as string,
+            access_count: (r.access_count as number || 0) + 1,
+            last_accessed_at: Date.now(),
+          },
+        });
       } catch {
         // update on read is best-effort, ignore failure
       }
@@ -948,7 +950,7 @@ class MemoryStore {
       if (params.metadata !== undefined) {
         updated.metadata_json = JSON.stringify(params.metadata);
       }
-      await this.table!.update([updated]);
+      await this.table!.update({ values: updated as any });
       return { memory_id, updated: true };
     } catch {
       return { memory_id, updated: false };
@@ -1736,4 +1738,4 @@ const sw = getWorker(sessionKey);
 
 export default memoryRecallPlugin;
 
-export { MemoryStore, type MemoryStore };
+export { MemoryStore };

@@ -14,10 +14,10 @@
     "test:unit": "node --test tests/all.test.mjs",
     "test:worker": "node --test tests/worker-smoke.test.mjs && node --test tests/per-agent-isolation.test.mjs && node --test tests/worker-concurrency.test.mjs",
     "test:smoke": "node smoke-test.mjs",
-    "build": "tsc src/cli.ts --outDir dist --esModuleInterop --module es2022 --target es2022 --skipLibCheck && tsc src/index.ts --outDir dist --esModuleInterop --module es2022 --target es2022 --skipLibCheck"
+    "build": "tsc src/cli.ts --outDir dist --esModuleInterop --module es2022 --target es2022 --skipLibCheck --noImplicitAny false --noEmitOnError && tsc src/index.ts --outDir dist --esModuleInterop --module es2022 --target es2022 --skipLibCheck --noImplicitAny false --noEmitOnError"
   },
   "dependencies": {
-    "@lancedb/lancedb": "^0.27.2",
+    "@lancedb/lancedb": "^0.29.0",
     "@lancedb/lancedb-linux-x64-gnu": "^0.27.2",
     "@sinclair/typebox": "^0.34.49",
     "graphology": "^0.26.0",
