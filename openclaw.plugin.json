@@ -60,6 +60,18 @@
         "maximum": 168,
         "default": 24,
         "description": "Hours between decay/compaction cycles"
+      },
+      "llmModel": {
+        "type": "string",
+        "default": "qwen2.5:3b",
+        "description": "Ollama model for LLM extraction (e.g. qwen2.5:3b, qwen3.5:4b)"
+      },
+      "textMinLength": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 50,
+        "default": 5,
+        "description": "Minimum text length to trigger auto-store (messages shorter than this are ignored)"
       }
     }
   },

@@ -443,85 +443,36 @@ returns: {new_pid, status}
 
 ## CLI
 
-### Global `mr` command (recommended)
-
-After `npm link`, use from any directory:
+### Option A: Global `mr` command (requires `npm link`)
 
 ```bash
-# Initialize
-mr init --agent-id main
-
-# Store a memory
-mr store --agent-id main --content "Marlon's futu OpenD at ~/FutuOpenD"
-
-# Recall (L1/L2/L3 cascade)
-mr recall --agent-id main --query "futu OpenD" --max 5
-
-# Search (BM25 keyword)
-mr search --agent-id main --query "futu OpenD"
-
-# List all memories
-mr list --agent-id main
-
-# Statistics
-mr stats --agent-id main
-
-# Get by ID
-mr get --agent-id main --memory-id <id>
-
-# Browse
-mr browse --agent-id main --max 10
-
-# Delete a memory
-mr forget --agent-id main --memory-id <id>
-
-# Reset all (requires --force)
-mr reset --agent-id main --force
-```
-
-### Standalone CLI (node call)
-
-Without `npm link`, use the full path:
-
-```bash
-# Build
+# Build first
 npm run build
 
-# Run CLI
-node dist/cli.js <command> [options]
+# Link globally (one-time setup)
+cd ~/projects/memory-recall && npm link
 
-# Initialize
-node dist/cli.js init --agent-id main
-
-# Store a memory
-node dist/cli.js store --agent-id main --content "Marlon's futu OpenD at ~/FutuOpenD"
-
-# Recall (L1/L2/L3 cascade)
-node dist/cli.js recall --agent-id main --query "futu OpenD" --max 5
-
-# Search (BM25 keyword)
-node dist/cli.js search --agent-id main --query "futu OpenD"
-
-# List all memories
-node dist/cli.js list --agent-id main
-
-# Statistics
-node dist/cli.js stats --agent-id main
-
-# Get by ID
-node dist/cli.js get --agent-id main --memory-id <id>
-
-# Browse
-node dist/cli.js browse --agent-id main --max 10
-
-# Delete a memory
-node dist/cli.js forget --agent-id main --memory-id <id>
-
-# Reset all (requires --force)
-node dist/cli.js reset --agent-id main --force
+# Then use mr from any directory
+mr init --agent-id main
+mr store --agent-id main --content "Marlon's futu OpenD at ~/FutuOpenD"
+mr recall --agent-id main --query "futu OpenD" --max 5
+mr list --agent-id main
+mr stats --agent-id main
 ```
 
-### ACP Tools (runtime)
+Note: `npm run build` may show TypeScript warnings but the compiled output in `dist/` works correctly.
+
+### Option B: Direct node call (no setup needed)
+
+```bash
+# No npm link required - use full path
+node /path/to/memory-recall/dist/cli.js <command> [options]
+
+# Examples
+node ~/projects/memory-recall/dist/cli.js init --agent-id main
+node ~/projects/memory-recall/dist/cli.js store --agent-id main --content "Marlon's futu OpenD"
+node ~/projects/memory-recall/dist/cli.js recall --agent-id main --query "futu OpenD" --max 5
+```
 
 All commands available via `mr_memory_*` / `memory_*` plugin tools:
 

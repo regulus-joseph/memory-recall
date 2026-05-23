@@ -26,6 +26,8 @@ interface MemoryRecallConfig {
   autoRecallMaxChars?: number;
   decayEnabled?: boolean;
   decayIntervalHours?: number;
+  llmModel?: string;
+  textMinLength?: number;
 }
 
 function parsePluginConfig(value: unknown): MemoryRecallConfig {
@@ -87,9 +89,9 @@ interface MemoryRecord {
 // ─── Memory Store (pure TypeScript) ────────────────────────────────────────────
 
 const EMBEDDING_URL = process.env.EMBEDDING_URL || "http://localhost:11434/api/embeddings";
-const EMBEDDING_MODEL = process.env.EMBEDDING_MODEL || "bge-m3";
+const EMBEDDING_MODEL = process.env.OLLAMA_EMBED_MODEL || "bge-m3";
 const OLLAMA_URL = process.env.OLLAMA_URL || "http://localhost:11434";
-const LLM_MODEL = process.env.LLM_MODEL || "qwen3.5:4b";
+const OLLAMA_LLM_MODEL = process.env.OLLAMA_LLM_MODEL || "qwen2.5:3b";
 const DATA_DIR = process.env.DATA_DIR || join(homedir(), ".memory-recall", "data");
 const EMBEDDING_DIM = 1024;
 
@@ -147,7 +149,7 @@ interface ExtractedFields {
   summary: string;
 }
 
-async function extractFields(content: string): Promise<ExtractedFields> {
+async function extractFields(content: string, llmModel: string): Promise<ExtractedFields> {
   const prompt = `You are a memory extraction system. Analyze the following text and extract structured memory fields. Return ONLY a valid JSON object with these exact fields (no markdown, no explanation):
 
 {
@@ -172,7 +174,7 @@ Respond with ONLY the JSON object.`;
   const resp = await fetch(`${OLLAMA_URL}/api/generate`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ model: LLM_MODEL, prompt, stream: false }),
+    body: JSON.stringify({ model: llmModel, prompt, stream: false, think: false }),
     signal: AbortSignal.timeout(60000),
   });
   if (!resp.ok) throw new Error(`extract failed: ${resp.status}`);
@@ -377,6 +379,7 @@ class MemoryStore {
     agent_id?: string;
     conversation_id?: string;
     metadata?: Record<string, unknown>;
+    llmModel?: string;
   }): Promise<{ memory_id: string; conversation_id: string; dedup: boolean }> {
     await this._ensureInit();
     const content = params.content;
@@ -385,7 +388,7 @@ class MemoryStore {
 
     const [embedding, extracted] = await Promise.all([
       getEmbedding(content),
-      extractFields(content).catch(() => ({
+      extractFields(content, params.llmModel || OLLAMA_LLM_MODEL).catch(() => ({
         category: "other", importance: 0.5, confidence: 0.5,
         temporal_type: "dynamic", who: "", what: "", when: "",
         where: "", why: "", how: "", summary: content.slice(0, 200),
@@ -701,7 +704,7 @@ class MemoryStore {
     summary: string;
   }> {
     await this._ensureInit();
-    return extractFields(params.content);
+    return extractFields(params.content, OLLAMA_LLM_MODEL);
   }
 
   async reset(params: { agent_id?: string; force?: boolean }): Promise<{
@@ -1552,7 +1555,7 @@ api.on("message_received", async (event, ctx) => {
         console.log(`[memory-recall] message_received channel=${event.channelId} from=${event.from} sessionKey=${sessionKey} agentId=${agentId} (ctx.sessionKey=${ctx?.sessionKey})`);
         const text = extractText(event.content);
         console.log("[memory-recall] message_received extractText:", { textLen: text?.length ?? null, textPreview: text?.slice(0, 80) });
-        if (!text || text.length < 10) return;
+        if (!text || text.length < 5) return;
         api.logger.info(`[memory-recall] message_received: storing text.len=${text.length}, sessionKey=${sessionKey}`);
         const maxResults = config.autoRecallMaxItems ?? 3;
 
@@ -1563,6 +1566,7 @@ api.on("message_received", async (event, ctx) => {
           agent_id: agentId,
           conversation_id: event.sessionKey ?? event.conversationId,
           metadata,
+          llmModel: config.llmModel,
         }).catch(err => {
           api.logger.warn(`[memory-recall] auto-store failed: ${String(err)}`);
         });
@@ -1594,7 +1598,7 @@ api.on("message_received", async (event, ctx) => {
         for (const msg of messages) {
           if (msg.role === "assistant") {
             const text = extractText(msg.content);
-            if (text && text.length > 10) {
+            if (text && text.length > (config.textMinLength ?? 5)) {
               const metadata = { role: "assistant" };
 const sw = getWorker(sessionKey);
               sw.store({
