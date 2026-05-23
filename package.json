@@ -7,7 +7,15 @@
   "openclaw": {
     "extensions": [
       "./src/index.ts"
-    ]
+    ],
+    "compat": {
+      "pluginApi": ">=2026.3.24-beta.2",
+      "minGatewayVersion": "2026.3.24-beta.2"
+    },
+    "build": {
+      "openclawVersion": "2026.3.24-beta.2",
+      "pluginSdkVersion": "2026.3.24-beta.2"
+    }
   },
   "scripts": {
     "test": "node --test tests/all.test.mjs && node --test tests/per-agent-isolation.test.mjs && node --test tests/worker-concurrency.test.mjs && node --test tests/bm25-negative-score.test.mjs && node --test tests/worker-smoke.test.mjs",
