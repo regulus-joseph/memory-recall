@@ -566,6 +566,7 @@ npm run test:smoke
 
 | Issue | Description | Status |
 |-------|-------------|--------|
+| Config warning: plugin disabled | `plugins.entries.memory-recall: plugin disabled (memory slot set to "memory-core") but config is present` — this is expected when memory-core owns the slot; memory-recall tools still work via mr_memory_* prefix | ⚠️ expected |
 | `agent_id` legacy filter bug | L2/L3 may not filter correctly on agent_id in some cases | ⚠️ known |
 | First decay cycle may timeout | Worker cold start, subsequent cycles normal | ⚠️ known |
 | LanceDB FTS auto-initializes on first store | Creates `create_fts_index("tokens")` automatically | ✅ handled |
@@ -576,6 +577,7 @@ npm run test:smoke
 
 | Version | Date | Changes |
 |---------|------|---------|
+| **0.8.1** | 2026-05-23 | LanceDB 0.29.0 adapter (makeArrowTable vector field, update format); openclaw-plugin-sdk stub moved to .d.ts; registerTool 1-arg form; TS compilation warnings remain but runtime works |
 | **0.8.0** | 2026-05-17 | **LanceDB schema fix** (`memory_id` not `id`); `makeArrowTable()` for Arrow typed data; table init with dummy row; **qwen3.5:4b** model (was qwen2.5:7b); **hook system fixed** (before_prompt_build uses `event.prompt`, message_received works for all channels); recall cache with TTL injection; 25 unit tests passing |
 | **0.7.0** | 2026-05-17 | **Pure TypeScript rewrite** — no Python worker; LanceDB + graphology + nodejieba + bm25; direct Ollama API for embedding + LLM extraction; per-session `MemoryStore` instances |
 | 0.6.0 | 2026-05-16 | Per-session workers architecture; `memory_worker_status` / `memory_worker_restart` tools |
