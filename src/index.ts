@@ -1621,7 +1621,7 @@ const sw = getWorker(sessionKey);
     if (autoRecall) {
       api.on("before_prompt_build", async (event, ctx) => {
         const sessionKey = ctx?.sessionKey ?? "default";
-        const userMessage = event.prompt || "";
+        const userMessage = String((event as { prompt?: string }).prompt || "");
         console.log(`[memory-recall] before_prompt_build sessionKey=${sessionKey} prompt.len=${userMessage.length}`);
         
         if (!userMessage || userMessage.length < 3) return {};
