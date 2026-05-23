@@ -1,6 +1,6 @@
 {
   "name": "memory-recall",
-  "version": "0.8.0",
+  "version": "0.8.1",
   "type": "module",
   "description": "L1/L2/L3 cascade memory recall plugin for OpenClaw with per-agent LanceDB storage, Weibull decay, and progressive compaction. Pure TypeScript.",
   "main": "src/index.ts",
@@ -29,7 +29,17 @@
   },
   "changelog": [
     {
-      "version": "0.8.0",
+      "version": "0.8.1",
+      "date": "2026-05-23",
+      "changes": [
+        "LanceDB 0.29.0 adapter: makeArrowTable passes vector as plain field",
+        "table.update uses { values: obj } format instead of array",
+        "TypeScript: openclaw-plugin-sdk stub moved to .d.ts (fix TS2664)",
+        "registerTool accepts 1-arg form (toolDef only)",
+        "api.on() optional third arg for hook options"
+      ]
+    },
+    {
       "date": "2026-05-17",
       "changes": [
         "LanceDB field name fix (memory_id instead of id)",

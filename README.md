@@ -2,7 +2,7 @@
 
 > L1/L2/L3 cascade memory recall for OpenClaw: per-agent LanceDB (vector + BM25 + graph) + Weibull decay + progressive compaction. Pure TypeScript.
 
-**v0.8.0** · OpenClaw 2026.5.x compatible
+**v0.8.1** · OpenClaw 2026.5.x compatible
 
 ---
 

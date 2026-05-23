@@ -2,7 +2,7 @@
 
 > 适用环境：Win11 + WSL2 (Ubuntu)
 > 目标用户：个人开发者
-> 当前版本：v0.8.0 (纯 TypeScript，无 Python worker)
+> 当前版本：v0.8.1 (纯 TypeScript，无 Python worker)
 
 ---
 
